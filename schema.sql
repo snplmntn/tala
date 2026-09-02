@@ -4,9 +4,9 @@
 --   snapshot(n) + events in (n, n+1] + reported_interest + adjustment = snapshot(n+1)
 -- exactly, in integer centavos.
 --
--- Money is INTEGER centavos everywhere. `wrangler d1 export` passes numerics through
--- JavaScript's 52-bit float precision, so a REAL peso column drifts — and the drift would
--- land in the reconciliation adjustment, where it reads as unlogged spending.
+-- Money is INTEGER centavos everywhere. A dump passes numerics through JavaScript's
+-- 52-bit float precision, so a REAL peso column drifts — and the drift would land in the
+-- reconciliation adjustment, where it reads as unlogged spending.
 
 ------------------------------------------------------------------------------
 -- accounts: rows, not an enum in three places.
@@ -25,7 +25,12 @@ CREATE TABLE accounts (
   -- Every tracked pot credits DAILY, so there is no cadence column. A future
   -- monthly-crediting account needs `credits_daily` plus a confirm-at-close path.
   rate                  REAL    NOT NULL DEFAULT 0,
-  rate_source           TEXT    NOT NULL DEFAULT 'seeded_net',  -- 'seeded_net' | 'observed'
+  rate_source           TEXT    NOT NULL DEFAULT 'seeded_net',  -- 'seeded_net' | 'observed' | 'manual'
+  -- The learner's STABLE sanity reference, never rewritten by the learner itself.
+  -- Guarding against the live `rate` instead would be a one-way ratchet: a lapsed Maya
+  -- boost drops the rate to 0.024, and the boost coming back at 0.08 would then exceed
+  -- 2x the new reference and be rejected as a mis-typed credit, forever.
+  rate_seed             REAL    NOT NULL DEFAULT 0,
   -- Where the rate falls to when a monthly-requalifying boost lapses. The learner must
   -- accept a drop to this as real, not as a data error.
   rate_floor            REAL    NOT NULL DEFAULT 0,
@@ -40,8 +45,8 @@ CREATE TABLE accounts (
 ------------------------------------------------------------------------------
 -- inbox: written BEFORE the LLM call, always.
 -- Three mechanisms in one table:
---   1. Idempotency. Telegram redelivers on any non-2xx, and the 10ms Workers CPU
---      ceiling makes mid-handler death routine, so duplicate rows are a certainty.
+--   1. Idempotency. Telegram redelivers anything not acknowledged, and a free tier that
+--      spins down makes mid-handler death routine, so duplicate rows are a certainty.
 --   2. Recovery. A Groq 5xx or an exhausted daily quota defers the parse instead of
 --      losing the expense you watched vanish.
 --   3. Regression fixtures. Groq's free-tier model lineup churns; raw_text + model_id
@@ -95,9 +100,9 @@ CREATE TABLE events (
   settled_at             TEXT,              -- set once, closes the receivable
   transfer_id            TEXT,              -- both legs share it; sum must be 0
   fee_centavos           INTEGER,           -- on the source leg only
-  -- Manila civil date. Workers have no local timezone, so toISOString().slice(0,10)
-  -- misdates a guaranteed 8-hour window every day and, on the 1st, moves rows out of
-  -- the month's recap and accrual base entirely.
+  -- Manila civil date. A UTC host misdates a guaranteed 8-hour window every day via
+  -- toISOString().slice(0,10) and, on the 1st, moves rows out of the month's recap and
+  -- accrual base entirely.
   occurred_at            TEXT    NOT NULL,  -- YYYY-MM-DD
   logged_at              TEXT    NOT NULL,  -- UTC ISO8601
   corrects_id            INTEGER REFERENCES events(id),
@@ -114,8 +119,8 @@ CREATE INDEX events_root         ON events (corrects_id);
 CREATE INDEX events_transfer     ON events (transfer_id);
 
 ------------------------------------------------------------------------------
--- Append-only, in the database rather than in app code. One `wrangler d1 execute
--- "UPDATE ..."` at 1am would otherwise break the only invariant with no detection.
+-- Append-only, in the database rather than in app code. One `turso db shell` UPDATE at
+-- 1am would otherwise break the only invariant with no detection anywhere.
 -- The permitted mutation is exactly: one NULL -> value transition on one of three
 -- set-once columns. Everything else aborts.
 ------------------------------------------------------------------------------
@@ -202,13 +207,13 @@ CREATE TABLE rate_observations (
 -- Maribank: 3.25% gross -> 0.026 net. Base tier-1 rate, effective 2026-01-15, no boost
 -- mechanic and no end date, so this seed is stable.
 ------------------------------------------------------------------------------
-INSERT INTO accounts (id, name, book, kind, rate, rate_floor, rate_cap_centavos, cashback_rate, cashback_cap_centavos, sort) VALUES
-  ('maya',     'Maya Savings', 'personal', 'ewallet', 0.08, 0.024, 10000000, 0, NULL, 1),
-  ('maribank', 'Maribank',     'personal', 'bank',    0.026, 0.026,     NULL, 0, NULL, 2),
-  ('gcash',    'GCash',        'personal', 'ewallet', 0,     0,         NULL, 0, NULL, 3),
-  ('bdo',      'BDO Pay',      'personal', 'bank',    0,     0,         NULL, 0, NULL, 4),
-  ('cash',     'Cash on hand', 'personal', 'cash',    0,     0,         NULL, 0, NULL, 5),
-  ('gotyme',   'GoTyme',       'business', 'bank',    0,     0,         NULL, 0, NULL, 6);
+INSERT INTO accounts (id, name, book, kind, rate, rate_seed, rate_floor, rate_cap_centavos, cashback_rate, cashback_cap_centavos, sort) VALUES
+  ('maya',     'Maya Savings', 'personal', 'ewallet', 0.08,  0.08,  0.024, 10000000, 0, NULL, 1),
+  ('maribank', 'Maribank',     'personal', 'bank',    0.026, 0.026, 0.026,     NULL, 0, NULL, 2),
+  ('gcash',    'GCash',        'personal', 'ewallet', 0,     0,     0,         NULL, 0, NULL, 3),
+  ('bdo',      'BDO Pay',      'personal', 'bank',    0,     0,     0,         NULL, 0, NULL, 4),
+  ('cash',     'Cash on hand', 'personal', 'cash',    0,     0,     0,         NULL, 0, NULL, 5),
+  ('gotyme',   'GoTyme',       'business', 'bank',    0,     0,     0,         NULL, 0, NULL, 6);
 -- Cashback seeds at 0 on purpose and is learned only from real credits: PH cashback is
 -- overwhelmingly vouchers, coins and points, so a projected PESO is never trued up by a
 -- cash credit and `expected` would climb forever with reconciliation blaming you.

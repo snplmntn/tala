@@ -20,6 +20,7 @@ export interface Account {
   kind: string;
   rate: number;
   rate_source: string;
+  rate_seed: number;
   rate_floor: number;
   rate_cap_centavos: number | null;
   cashback_rate: number;
@@ -309,10 +310,22 @@ export class Db {
     };
   }
 
-  setRate(accountId: string, rate: number): Write {
-    return {
-      sql: "UPDATE accounts SET rate = ?, rate_source = 'observed' WHERE id = ?",
-      args: [rate, accountId],
-    };
+  /**
+   * Move the live rate. `rate_seed` is deliberately untouched: it is the learner's stable
+   * sanity band, and rewriting it would turn a lapsed Maya boost into a one-way ratchet
+   * that rejects the boost coming back.
+   *
+   * A manual set DOES move the seed, because that is the user asserting a new baseline.
+   */
+  setRate(accountId: string, rate: number, source: 'observed' | 'manual'): Write {
+    return source === 'manual'
+      ? {
+          sql: "UPDATE accounts SET rate = ?, rate_seed = ?, rate_source = 'manual' WHERE id = ?",
+          args: [rate, rate, accountId],
+        }
+      : {
+          sql: "UPDATE accounts SET rate = ?, rate_source = 'observed' WHERE id = ?",
+          args: [rate, accountId],
+        };
   }
 }

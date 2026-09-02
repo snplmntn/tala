@@ -161,7 +161,7 @@ never an "unauthorized" reply that would confirm the bot exists.
 Do this before Render. A local restart is one second; a Render redeploy is two minutes.
 
 ```bash
-npm test          # 31 asserts — must be 31/31 before you trust any number it shows you
+npm test          # 34 asserts — must be 31/31 before you trust any number it shows you
 npm run typecheck
 npm run dev
 ```
@@ -178,6 +178,8 @@ the jollibee was 285 not 250   -> echoes the matched row: "jollibee, 2026-..., �
 600 dinner maribank, 400 not mine
 sent 2k from maya to gotyme, fee 10
 /balance                       -> confirmed vs expected, per book
+/interest maya 21.48           -> records the credit and learns the rate from it
+/rate                          -> every rate, and whether it is estimated or observed
 /undo                          -> voids the last entry
 /csv                           -> the whole ledger as a file
 ```
@@ -349,10 +351,17 @@ Open **Maya → Maya Savings → transaction history** and read yesterday's inte
 | **~₱27.92**                                  | The 10% stacks _on top_ of base — 13% gross. Set it to `0.104`. |
 | **~₱6.44**, one row only                     | The boost lapsed this month. Set `0.024` and check your spend.  |
 
-```bash
-# only if the reading says so:
-turso db shell tala "UPDATE accounts SET rate = 0.10 WHERE id = 'maya'"
+Whatever it says, set it from the chat — no SQL:
+
 ```
+/rate maya 10% gross     # the number on their website; stores 0.08 net
+/rate maya 8% net        # what actually lands; stores 0.08
+/rate                    # see every rate and where it came from
+```
+
+The basis word is required. Both banks advertise gross and credit net, so a bare
+`/rate maya 10%` is refused rather than guessed — that missing word is a 25% error on every
+projection the pot ever makes.
 
 Expect **two** credit rows a day on Maya — base and boost post separately (₱6.44 + ₱15.04 at
 a ₱98,000 balance). Tala sums same-day interest rows before learning a rate, because a
@@ -360,10 +369,24 @@ learner that reads them as two separate days converges on 2.4% or 5.6% from a pe
 correct 8% seed.
 
 Honestly, though: the seed barely matters. Both pots credit **daily**, so the moment you
-report one real credit — `maya credited 21.48`, an ordinary income message — the learner
-takes over and `rate_source` flips from `seeded_net` to `observed`. Do that in the first
-couple of days and the seed stops mattering permanently, including when Maya changes the rate
-on you in March.
+report one real credit the learner takes over:
+
+```
+/interest maya 21.48
+   -> +₱21.48 interest · Maya Savings · 3d since 2026-09-01
+      rate learned: 8.02% net (was 8.00%)
+```
+
+`rate_source` flips from `seeded_net` to `observed`, the `(est)` marker clears from
+`/balance`, and the number is now derived from your actual account rather than from anything
+written here. Do it twice in the first few days — the learner wants two observations before
+it moves — and the seed stops mattering permanently, including when Maya changes the rate on
+you in March.
+
+If a reported credit implies something wild (a ₱5 residual on a ₱50 average balance implies
+120% p.a.), it is refused and the old rate is kept, with the reason stated. A _lapsed boost_
+is not wild, though — a drop to 2.4% is accepted as real, because that is what actually
+happened.
 
 ---
 

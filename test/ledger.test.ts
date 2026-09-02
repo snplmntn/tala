@@ -29,6 +29,7 @@ import {
   lateEntryPair,
   manilaDate,
   parseAmount,
+  parseRate,
   peso,
   spendByCategory,
   sum,
@@ -537,4 +538,48 @@ test('re-anchoring the same day twice leaves the balance identical', () => {
   const b = balanceOf(MARIBANK, { ...anchor }, rows, '2026-09-05');
   assert.equal(a.confirmed, b.confirmed);
   assert.equal(a.expected, b.expected);
+});
+
+// ── rates typed by a human: the one place worth refusing rather than guessing ──
+
+test('parseRate applies the withholding tax to a gross figure', () => {
+  // Both banks advertise gross and credit net. Typing Maya's advertised 10% as a rate
+  // would run every projection 25% hot forever.
+  assert.equal(parseRate('10%', 'gross'), 0.08);
+  assert.equal(parseRate('3.25%', 'gross'), 0.026);
+  assert.equal(parseRate('0.10', 'gross'), 0.08);
+
+  // A net figure is stored as given.
+  assert.equal(parseRate('8%', 'net'), 0.08);
+  assert.equal(parseRate('0.026', 'net'), 0.026);
+});
+
+test('parseRate refuses what it cannot read unambiguously', () => {
+  // "10" could be 10% or 1000%, and this number multiplies every future balance.
+  assert.equal(parseRate('10', 'net'), null);
+  assert.equal(parseRate('3.25', 'net'), null);
+  assert.equal(parseRate('lots', 'net'), null);
+  assert.equal(parseRate('-5%', 'net'), null);
+  // A deposit rate above 50% is a typo, not a promo.
+  assert.equal(parseRate('900%', 'net'), null);
+  // And zero is a legitimate value: it means "stop tracking this pot".
+  assert.equal(parseRate('0', 'net'), 0);
+});
+
+test('the learner survives a boost lapsing and coming back', () => {
+  // The reason rate_seed exists. Guarding against the LIVE rate is a one-way ratchet:
+  // a lapsed Maya boost drops 0.08 -> 0.024, and then 0.08 returning exceeds 2 x 0.024
+  // and is rejected as a mis-typed credit, forever.
+  const SEED = 0.08;
+  const lapsed = accrue(9_800_000, '2026-09-01', '2026-10-01', new Map(), { ...MAYA, rate: 0.024 });
+  const down = learnRate(lapsed.interest, lapsed.centavoDays, SEED, 2);
+  assert.ok(down.accepted && Math.abs(down.implied - 0.024) < 0.001);
+
+  const restored = accrue(9_800_000, '2026-10-01', '2026-11-01', new Map(), MAYA);
+  const up = learnRate(restored.interest, restored.centavoDays, SEED, 3);
+  assert.ok(up.accepted, `boost returning must be accepted: ${up.reason}`);
+  assert.ok(Math.abs(up.implied - 0.08) < 0.001);
+
+  // Against the lapsed live rate instead, the same credit is wrongly rejected.
+  assert.equal(learnRate(restored.interest, restored.centavoDays, 0.024, 3).accepted, false);
 });

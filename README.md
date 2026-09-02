@@ -84,9 +84,21 @@ interest is no longer tracked.
 
 **Rates are net, and then learned.** Both banks advertise gross and credit net (Maya T&C
 4.6, MariBank help article 10070), and the PH withholds 20% final tax at source with no
-de minimis floor for interest. So seeds are `advertised × 0.80` and the learner replaces
-them from real credits — which absorbs tier blending, promo expiry and the tax without any
-rate-rules engine.
+de minimis floor for interest. So seeds are `advertised × 0.80`, and reporting one real
+credit replaces the seed permanently:
+
+```
+/interest maya 21.48     -> rate learned: 8.02% net (was 8.00%)
+/rate                    -> see every rate and where it came from
+/rate maya 10% gross     -> set one by hand (the basis word is required)
+```
+
+Rates live in `accounts` rows, never in code — nothing here is a constant. The learner needs
+two observations and refuses a result outside `[0, 2 × rate_seed]`, keeping the good seed
+and saying why rather than writing an authoritative wrong number. `rate_seed` is the stable
+band and the learner never rewrites it: guarding against the live rate would be a one-way
+ratchet, where a lapsed Maya boost drops the rate to 2.4% and the boost returning at 8%
+then exceeds twice the new reference and is rejected forever.
 
 ## Ceilings — deliberate shortcuts and where they break
 
@@ -179,7 +191,7 @@ the social-engineering attacks that _do_ move money on PH e-wallets.
 ## Verify
 
 ```bash
-npm test         # 31 asserts, node --test, no framework
+npm test         # 34 asserts, node --test, no framework
 npm run typecheck
 npm run format
 ```

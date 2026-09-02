@@ -13,6 +13,7 @@
 import { Db, type Account } from './db.ts';
 import { CATEGORIES, resolveDate, type Extracted } from './extract.ts';
 import {
+  accrue,
   addDays,
   balanceOf,
   bookingDate,
@@ -20,12 +21,16 @@ import {
   dayDiff,
   drift,
   effective,
+  flowsByDate,
   lateEntryPair,
+  learnRate,
   parseAmount,
+  parseRate,
   peso,
   spendByCategory,
   sum,
   unsettled,
+  windowFor,
   type Event,
 } from './ledger.ts';
 import type { Keyboard } from './telegram.ts';
@@ -357,7 +362,7 @@ export async function snapshot(db: Db, accounts: Account[], text: string, today:
 
   await db.batch(writes);
   if (account.rate > 0) {
-    lines.push('what interest did it credit since the last anchor? reply: interest 653');
+    lines.push(`what interest did it credit since the last anchor? reply: /interest ${account.id} 653`);
   }
   return { text: lines.join('\n') };
 }
@@ -508,4 +513,153 @@ export async function undo(db: Db): Promise<string> {
   if (!last) return 'nothing to undo';
   await db.batch([db.voidEvent(last.id, nowIso())]);
   return `voided: ${last.type} ${peso(Math.abs(last.amount_centavos))} ${last.account_id} ${last.occurred_at}`;
+}
+
+// ── rates: readable and settable from chat, and learned from real credits ────
+
+/**
+ * `/rate` to see them, `/rate maya 10% gross` to set one.
+ *
+ * Deterministic, no LLM — same reasoning as `/snap`. A rate multiplies every future
+ * projection for that pot, so it does not go through a probabilistic parser.
+ */
+export async function rates(db: Db, accounts: Account[], arg: string): Promise<Reply> {
+  const parts = arg.trim().split(/\s+/).filter(Boolean);
+
+  if (!parts.length) {
+    const lines = accounts.map((a) => {
+      if (a.rate === 0) return `  ${a.id.padEnd(9)} untracked`;
+      const src = a.rate_source === 'seeded_net' ? 'estimated' : a.rate_source;
+      const cap = a.rate_cap_centavos ? `, boosted up to ${peso(a.rate_cap_centavos)}` : '';
+      const floor = a.rate_floor !== a.rate ? `, floor ${(a.rate_floor * 100).toFixed(2)}%` : '';
+      return `  ${a.id.padEnd(9)} ${(a.rate * 100).toFixed(2)}% net (${src}${floor}${cap})`;
+    });
+    return {
+      text: [
+        'Rates are stored NET — what actually lands in the account.',
+        ...lines,
+        '',
+        'Set one:  /rate maya 10% gross   (or "8% net")',
+        'Report a real credit and it learns instead:  /interest maya 21.48',
+      ].join('\n'),
+    };
+  }
+
+  const [id, value, basis] = parts;
+  const account = acct(accounts, id?.toLowerCase() ?? null);
+  if (!account) return { text: `Unknown account "${id}". One of: ${accounts.map((a) => a.id).join(' / ')}` };
+  if (!value)
+    return {
+      text: `${account.name} is at ${(account.rate * 100).toFixed(2)}% net. Set it: /rate ${account.id} 10% gross`,
+    };
+
+  if (basis !== 'gross' && basis !== 'net') {
+    // Refused, not guessed. Both banks advertise gross and credit net, so a missing basis
+    // word is a 25% error waiting to happen on every projection this pot ever makes.
+    return {
+      text: [
+        `Say gross or net — the banks advertise one and pay the other.`,
+        `  /rate ${account.id} ${value} gross   ← the number on their website`,
+        `  /rate ${account.id} ${value} net     ← what actually lands`,
+      ].join('\n'),
+    };
+  }
+
+  const rate = parseRate(value, basis);
+  if (rate == null)
+    return { text: `Couldn't read "${value}" as a rate. Use a percentage ("10%") or a decimal ("0.10").` };
+
+  await db.batch([db.setRate(account.id, rate, 'manual')]);
+  const gross = basis === 'gross' ? ` (${value} gross, less the 20% withholding)` : '';
+  return { text: `${account.name} → ${(rate * 100).toFixed(2)}% net${gross}` };
+}
+
+/**
+ * `/interest maya 21.48` — report a credit you actually saw, and let the rate learn itself.
+ *
+ * This is the path that makes the seed stop mattering. Both tracked pots credit DAILY, so
+ * you can report a real credit on day two and the seed is replaced permanently — including
+ * when Maya changes the rate on you in March.
+ *
+ * Deterministic for the same reason as /snap and /rate: it feeds the number that scales
+ * every future projection.
+ */
+export async function interest(db: Db, accounts: Account[], arg: string, today: string): Promise<Reply> {
+  const m = arg.trim().match(/^([a-z]+)\s+([\d,.]+)$/i);
+  if (!m) {
+    const earning = accounts.filter((a) => a.rate > 0).map((a) => a.id);
+    return {
+      text: `Report a credit you saw in the app: /interest ${earning[0] ?? 'maya'} 21.48\n\nEarning pots: ${earning.join(' / ') || 'none'}`,
+    };
+  }
+
+  const account = acct(accounts, m[1].toLowerCase());
+  if (!account) return { text: `Unknown account "${m[1]}".` };
+  const credited = parseAmount(m[2]);
+  if (credited == null || credited <= 0) return { text: `Couldn't read "${m[2]}" as an amount.` };
+
+  const anchor = await db.latestSnapshot(account.id);
+  const write = db.insertEvent({
+    type: 'interest',
+    book: account.book,
+    account_id: account.id,
+    amount_centavos: credited,
+    occurred_at: today,
+    logged_at: nowIso(),
+    note: 'reported credit',
+  } as never);
+
+  if (!anchor) {
+    await db.batch([write]);
+    return {
+      text: `+${peso(credited)} interest · ${account.name}\n\nAnchor a balance with /snap to start learning the rate.`,
+    };
+  }
+
+  // The learner's denominator is the accrual's OWN centavo-days. Two implementations of
+  // centavo-days would fit the formula error as rate signal — which is the bug that
+  // destroys a good seed permanently and leaves nothing to explain the gap.
+  const rows = await db.eventsSince(account.id, anchor.as_of_date);
+  const fold = accrue(
+    anchor.balance_centavos,
+    anchor.as_of_date,
+    addDays(today, -1),
+    flowsByDate(windowFor(rows, account.id, anchor.as_of_date, today)),
+    account,
+  );
+
+  const seen = (await db.observationCount(account.id))?.n ?? 0;
+  const learned = learnRate(credited, fold.centavoDays, account.rate_seed || account.rate, seen + 1);
+
+  const writes = [
+    write,
+    db.recordObservation({
+      account_id: account.id,
+      period_start: anchor.as_of_date,
+      period_end: today,
+      credited_centavos: credited,
+      centavo_days: fold.centavoDays,
+      implied_rate: learned.implied,
+      accepted: learned.accepted,
+      reason: learned.reason,
+      logged_at: nowIso(),
+    }),
+  ];
+  if (learned.accepted) writes.push(db.setRate(account.id, learned.rate, 'observed'));
+  await db.batch(writes);
+
+  const lines = [`+${peso(credited)} interest · ${account.name} · ${fold.days}d since ${anchor.as_of_date}`];
+  if (learned.accepted) {
+    lines.push(
+      `rate learned: ${(learned.rate * 100).toFixed(2)}% net (was ${(account.rate * 100).toFixed(2)}%)`,
+    );
+    if (learned.rate < account.rate * 0.5)
+      lines.push('that looks like a lapsed boost, not an error — check your qualifying spend');
+  } else {
+    // Keeping the good seed and saying why beats writing an authoritative wrong number
+    // that nothing will ever pull back.
+    lines.push(`kept ${(account.rate * 100).toFixed(2)}% — ${learned.reason}`);
+    if (learned.implied > 0) lines.push(`(this credit implies ${(learned.implied * 100).toFixed(2)}%)`);
+  }
+  return { text: lines.join('\n') };
 }

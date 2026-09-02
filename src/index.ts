@@ -13,7 +13,7 @@ import { createServer } from 'node:http';
 import { Db } from './db.ts';
 import { extract } from './extract.ts';
 import { addDays, dayDiff, manilaDate, peso } from './ledger.ts';
-import { applyEvent, balances, callback, csv, recap, snapshot, undo } from './handlers.ts';
+import { applyEvent, balances, callback, csv, interest, rates, recap, snapshot, undo } from './handlers.ts';
 import {
   answerCallback,
   deleteWebhook,
@@ -100,6 +100,14 @@ async function handle(u: Update): Promise<void> {
         const r = await snapshot(db, accounts, rest.join(' '), today());
         return void (await send(TOKEN, m.chat.id, r.text, r.keyboard));
       }
+      case '/rate': {
+        const r = await rates(db, accounts, rest.join(' '));
+        return void (await send(TOKEN, m.chat.id, r.text, r.keyboard));
+      }
+      case '/interest': {
+        const r = await interest(db, accounts, rest.join(' '), today());
+        return void (await send(TOKEN, m.chat.id, r.text, r.keyboard));
+      }
       case '/undo':
         return void (await send(TOKEN, m.chat.id, await undo(db)));
       case '/csv':
@@ -168,6 +176,9 @@ const HELP = `Tala — say what you spent.
 /balance   confirmed vs expected, per book
 /recap     this month, or /recap 2026-08
 /snap      anchor a balance: /snap maya 98000
+/interest  report a real credit: /interest maya 21.48
+           (this is what replaces the estimated rate)
+/rate      see them, or set one: /rate maya 10% gross
 /undo      void the last entry
 /csv       the whole ledger as a spreadsheet`;
 

@@ -444,6 +444,34 @@ export function learnRate(
   return { accepted: true, rate: implied, implied, reason: 'learned from observed credits' };
 }
 
+/**
+ * Read a rate a human typed, and refuse anything ambiguous.
+ *
+ * The basis word is mandatory and this is the one place worth being fussy about, because
+ * both banks ADVERTISE gross and CREDIT net. Type Maya's advertised 10% as a rate and every
+ * projection runs 25% hot forever — the exact error this whole design spent its effort
+ * removing. So "10% gross" and "8% net" both store 0.08, and a bare "10%" is refused.
+ *
+ * A bare integer is refused too: "10" could mean 10% or 1000%, and guessing at a number
+ * that multiplies every future balance is not a guess worth making.
+ */
+export function parseRate(value: string, basis: 'gross' | 'net'): number | null {
+  const raw = value.trim().toLowerCase();
+  const pct = raw.endsWith('%');
+  const n = Number(pct ? raw.slice(0, -1) : raw);
+  if (!Number.isFinite(n) || n < 0) return null;
+
+  let rate: number;
+  if (pct) rate = n / 100;
+  else if (n < 1)
+    rate = n; // 0.08 is unambiguous
+  else return null; // "10" without a % sign
+
+  if (basis === 'gross') rate *= 0.8; // PH withholds 20% final tax at source
+  // A deposit rate above 50% is a typo, not a promo.
+  return rate > 0.5 ? null : Math.round(rate * 1e6) / 1e6;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Integrity checks. The only mechanisms that tell a real bug from ordinary drift.
 // ─────────────────────────────────────────────────────────────────────────────
