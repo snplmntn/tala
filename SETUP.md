@@ -40,10 +40,13 @@ Not Render's own Postgres, for one disqualifying reason — **a free Render Post
 30 days after creation.** A ledger you intend to keep for years cannot live on that clock.
 
 ```bash
-# Install the CLI (macOS)
-brew install tursodatabase/tap/turso
-# or, anywhere:  curl -sSfL https://get.tur.so/install.sh | bash
+# Install the CLI. Use the install script, not Homebrew: as of 2026-09 the
+# tursodatabase/tap formula declares a dependency on the retired libsql/sqld tap
+# and fails to resolve with "No available formula with the name libsql/sqld/sqld".
+curl -sSfL https://get.tur.so/install.sh | bash
+source ~/.zshrc          # the installer appends ~/.turso to PATH
 
+turso --version          # expect v1.x
 turso auth signup        # opens a browser; no card
 turso db create tala
 ```
@@ -131,8 +134,8 @@ is no reason for a stranger who finds yours to learn what it does.
 
 ### Getting your chat id
 
-Use the bot's own guard log — no third-party bot needed. Set the owner id to `0` for a
-moment, start it, and message it:
+The bot tells you. Set the owner id to `0` — an explicit **pairing mode** — start it, and
+message it. No third-party bot, and nothing to look up.
 
 ```bash
 cd ~/Development/tala
@@ -143,16 +146,27 @@ npm install
 npm run dev
 ```
 
-Send your bot any message. The log prints:
+Send your bot any message. It replies with the number:
 
 ```
-2026-09-02T... ignored update from 123456789
+Your chat id is 123456789
+
+Set OWNER_CHAT_ID=123456789 and restart. Until then I ignore everything.
 ```
 
-That number is `OWNER_CHAT_ID`. Put it in `.env` and stop the process (Ctrl-C).
+Put it in `.env` and restart. While the id is `0` the bot records **nothing** — pairing mode
+grants no access, it just tells you the number.
 
-That line is the allowlist working as designed: an unrecognised sender gets **silence**,
-never an "unauthorized" reply that would confirm the bot exists.
+Once a real id is set, an unrecognised sender gets **silence** — never an "unauthorized"
+reply that would confirm the bot exists. And the value is validated at boot rather than
+trusted: unset refuses (because `Number('')` is `0`, so a forgotten variable would otherwise
+pair with whoever found the bot first, while nothing was being recorded), non-numeric
+refuses, and a negative refuses because those are group ids.
+
+Not self-discovered on purpose. "First sender becomes the owner" is a tempting pairing flow,
+but bot usernames are publicly searchable — between deploy and your first message there is a
+window where a stranger claims your ledger, and that failure is total, silent, and confusing
+to undo. One value you set once has no race at all.
 
 ---
 

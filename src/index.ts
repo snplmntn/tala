@@ -32,7 +32,36 @@ const env = (k: string): string => {
 };
 
 const TOKEN = env('TELEGRAM_TOKEN');
-const OWNER = Number(env('OWNER_CHAT_ID'));
+
+/**
+ * The allowlist, as one number.
+ *
+ * Not self-discovered on purpose. "First sender to message the bot becomes the owner" is a
+ * tempting pairing flow, but bot usernames are publicly searchable — so between deploy and
+ * your first message there is a window where a stranger can claim your ledger, and the
+ * failure is total, silent and confusing to recover from. A value you set once is smaller
+ * than a pairing-code table and has no race at all.
+ *
+ * `0` is an explicit PAIRING MODE rather than a silent misconfiguration: the bot replies
+ * with your chat id so you can set it from your phone instead of tailing a log. It grants
+ * nothing — an unauthorised sender still cannot write a row.
+ */
+const rawOwner = process.env.OWNER_CHAT_ID;
+// Unset is a MISCONFIGURATION and must refuse to boot; an explicit 0 is a request to pair.
+// Number('') is 0, not NaN, so this has to be checked on the string — otherwise forgetting
+// the variable on Render would quietly pair with the first stranger who finds the bot
+// while nothing at all is being recorded.
+if (rawOwner === undefined || rawOwner.trim() === '') {
+  throw new Error('missing env: OWNER_CHAT_ID (set it to 0 to pair and learn your id)');
+}
+const OWNER = Number(rawOwner);
+if (!Number.isInteger(OWNER) || OWNER < 0) {
+  // Negative ids are groups and channels, and group joins are disabled in BotFather — so a
+  // stray minus sign would leave the bot accepting nobody, which looks identical to a
+  // broken deploy. Refuse it with a reason instead.
+  throw new Error(`OWNER_CHAT_ID must be a positive whole number (your user id), got "${rawOwner}"`);
+}
+const PAIRING = OWNER === 0;
 const GROQ = env('GROQ_API_KEY');
 const db = new Db(env('TURSO_URL'), env('TURSO_TOKEN'));
 
@@ -59,7 +88,20 @@ const authorised = (u: Update): boolean => senderId(u) === OWNER;
 
 async function handle(u: Update): Promise<void> {
   if (!authorised(u)) {
-    log('ignored update from', senderId(u));
+    const id = senderId(u);
+    if (PAIRING && id != null) {
+      // Pairing replies to whoever asks, which is safe: it confirms a bot exists and
+      // grants nothing. Outside pairing mode an unauthorised sender gets silence, never
+      // an "unauthorized" message that would confirm the bot is real.
+      log('pairing: chat id', id);
+      await send(
+        TOKEN,
+        id,
+        `Your chat id is ${id}\n\nSet OWNER_CHAT_ID=${id} and restart. Until then I ignore everything.`,
+      );
+      return;
+    }
+    log('ignored update from', id);
     return;
   }
 
@@ -314,6 +356,11 @@ function health(): void {
     }
     res.writeHead(404).end();
   }).listen(port, () => log('health on', port));
+}
+
+if (PAIRING) {
+  log('PAIRING MODE — OWNER_CHAT_ID is 0, so nothing will be recorded.');
+  log('Message the bot; it will reply with your chat id. Set it, then restart.');
 }
 
 // Long-polling and a webhook are mutually exclusive; clear one left by an earlier deploy.
