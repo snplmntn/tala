@@ -16,6 +16,7 @@ import { addDays, dayDiff, manilaDate, peso } from './ledger.ts';
 import { COMMANDS, applyEvent, balances, callback, runCommand } from './handlers.ts';
 import {
   answerCallback,
+  clearKeyboard,
   deleteWebhook,
   getUpdates,
   photoAsDataUrl,
@@ -117,8 +118,18 @@ async function handle(u: Update): Promise<void> {
   }
 
   if (u.callback_query) {
-    const msg = await callback(db, u.callback_query.data ?? '', today());
-    await answerCallback(TOKEN, u.callback_query.id, msg);
+    const q = u.callback_query;
+    const r = await callback(db, q.data ?? '', today());
+    // The toast acknowledges the tap and is gone a second later, so it gets the first line
+    // and the chat gets the answer. Telegram caps it at 200 characters and silently fails
+    // the whole call above that, which is how a multi-line anchor result became no result.
+    await answerCallback(TOKEN, q.id, r.text.split('\n')[0].slice(0, 200));
+    if (r.advice || !q.message) return;
+    // The question has been answered: its buttons stop existing, and the outcome is posted
+    // as a message so the chat holds a record of it rather than a prompt that never resolved.
+    await clearKeyboard(TOKEN, q.message.chat.id, q.message.message_id);
+    await send(TOKEN, q.message.chat.id, r.text, r.keyboard);
+    history.add('assistant', r.text);
     return;
   }
 

@@ -584,49 +584,60 @@ export async function csv(db: Db): Promise<string> {
 
 // ── callbacks ───────────────────────────────────────────────────────────────
 
-export async function callback(db: Db, data: string, today: string): Promise<string> {
+/**
+ * What a tap produced. A plain string could not carry the follow-up KEYBOARD that
+ * anchorAccount returns on a first anchor — the one question the design says can only be
+ * asked once per account — so it was being dropped in silence.
+ */
+export interface CallbackReply extends Reply {
+  /** Guidance, not an action: leave the message and its buttons exactly where they are. */
+  advice?: boolean;
+}
+
+export async function callback(db: Db, data: string, today: string): Promise<CallbackReply> {
   const [kind, a, b] = data.split(':');
   const now = nowIso();
 
   if (kind === 'ok') {
     await db.batch([db.confirmEvent(Number(a), now)]);
-    return 'ok';
+    return { text: '✓ confirmed' };
   }
 
   if (kind === 'void') {
     // Always validate against CURRENT row state: a three-week-old inline keyboard stays
     // live in Telegram forever, so an unvalidated tap silently reverses a settled row.
     const row = await db.one<Event>('SELECT * FROM events WHERE id = ?', [Number(a)]);
-    if (!row) return 'gone';
-    if (row.voided_at) return 'already voided';
+    if (!row) return { text: 'That row is gone.' };
+    if (row.voided_at) return { text: 'Already voided.' };
     const anchor = await db.latestSnapshot(row.account_id);
     if (anchor && dayDiff(row.occurred_at, anchor.as_of_date) >= 0)
-      return 'that period is already reconciled — correct it instead';
+      return { text: 'That period is already reconciled — correct it instead.' };
     await db.batch([db.voidEvent(Number(a), now)]);
-    return 'voided';
+    return { text: '🗑 voided' };
   }
 
   if (kind === 'adj') {
     const row = await db.one<Event>('SELECT * FROM events WHERE id = ?', [Number(b)]);
-    if (!row || row.type !== 'adjustment') return 'gone';
+    if (!row || row.type !== 'adjustment') return { text: 'That row is gone.' };
     // The category is why this number is worth anything. Written to the row that already exists.
     await db.run('UPDATE events SET category = ? WHERE id = ? AND category IS NULL', [a, Number(b)]);
-    return `tagged as ${a}`;
+    return { text: `Tagged as ${a}.` };
   }
 
   if (kind === 'snap') {
     const account = (await db.accounts()).find((x) => x.id === a);
-    if (!account) return 'unknown account';
-    const r = await anchorAccount(db, account, Number(b), today);
-    return r.text;
+    if (!account) return { text: 'Unknown account.' };
+    // The whole reply, keyboard included: a first anchor answers with another question.
+    return anchorAccount(db, account, Number(b), today);
   }
-  if (kind === 'anchored') return 'kept as counted — the earlier spending stays in your recap only';
+  if (kind === 'anchored')
+    return { text: 'Kept as counted — the earlier spending stays in your recap only.' };
 
   if (kind === 'anchorsub') {
     const account = (await db.accounts()).find((x) => x.id === a);
-    if (!account) return 'unknown account';
+    if (!account) return { text: 'Unknown account.' };
     const anchor = await db.latestSnapshot(account.id);
-    if (!anchor) return 'no anchor to adjust';
+    if (!anchor) return { text: 'No anchor to adjust.' };
     const amount = Number(b);
     // Applied as an explicit adjustment dated after the anchor, not by moving the anchor.
     // The anchor stays exactly the figure you typed, and the ledger records why the balance
@@ -643,13 +654,19 @@ export async function callback(db: Db, data: string, today: string): Promise<str
         note: 'pre-anchor spending applied on request',
       } as never),
     ]);
-    return `applied ${peso(Math.abs(amount))} — balance is now ${peso(anchor.balance_centavos + amount)}`;
+    return {
+      text: `Applied ${peso(Math.abs(amount))} — balance is now ${peso(anchor.balance_centavos + amount)}.`,
+    };
   }
 
-  if (kind === 'nope') return 'cancelled';
-  if (kind === 'tx') return 'reply: transfer <amount> <from> to <to>, then void the expense';
-  if (kind === 'fix') return 'reply with the correction, e.g. "the jollibee was 285 not 250"';
-  return 'unknown action';
+  if (kind === 'nope') return { text: 'Cancelled — nothing was written.' };
+  // Advice, not an action. Both of these are waiting on a message you have not typed yet,
+  // so taking the buttons away would strand you if you changed your mind.
+  if (kind === 'tx')
+    return { text: 'Reply: transfer <amount> <from> to <to>, then void the expense.', advice: true };
+  if (kind === 'fix')
+    return { text: 'Reply with the correction, e.g. "the jollibee was 285 not 250".', advice: true };
+  return { text: 'Unknown action.' };
 }
 
 /** The one row class a matcher can never address: a bare "13" with no merchant and no note. */

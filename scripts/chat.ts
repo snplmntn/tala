@@ -119,7 +119,16 @@ async function handle(line: string): Promise<void> {
     return;
   }
   if (line.startsWith(':tap ')) {
-    console.log(await callback(db, line.slice(5).trim(), t));
+    const r = await callback(db, line.slice(5).trim(), t);
+    console.log(r.text);
+    if (r.keyboard)
+      console.log(
+        '  buttons:',
+        r.keyboard
+          .flat()
+          .map((b) => b.callback_data)
+          .join(' '),
+      );
     return;
   }
   if (line.startsWith(':raw ')) {

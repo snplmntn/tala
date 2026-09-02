@@ -58,6 +58,22 @@ export async function send(token: string, chatId: number, text: string, keyboard
   });
 }
 
+/**
+ * Take the buttons off a message once its question has been answered.
+ *
+ * This is the visible half of a tap: a toast is capped at 200 characters and vanishes, so
+ * without this the chat looks identical before and after. It also retires the keyboard,
+ * which otherwise stays tappable in Telegram forever — the hazard `void` already has to
+ * re-validate against current row state to survive.
+ */
+export async function clearKeyboard(token: string, chatId: number, messageId: number) {
+  return call(token, 'editMessageReplyMarkup', {
+    chat_id: chatId,
+    message_id: messageId,
+    reply_markup: { inline_keyboard: [] },
+  });
+}
+
 export async function answerCallback(token: string, id: string, text?: string) {
   return call(token, 'answerCallbackQuery', { callback_query_id: id, ...(text ? { text } : {}) });
 }

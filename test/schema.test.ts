@@ -288,7 +288,7 @@ test('a natural-language anchor writes nothing until confirmed', async () => {
   assert.equal(rows[0].balance_centavos, 9_800_000);
 
   // Cancelling writes nothing either.
-  assert.equal(await callback(db, 'nope', '2026-09-03'), 'cancelled');
+  assert.match((await callback(db, 'nope', '2026-09-03')).text, /Cancelled/);
 });
 
 test('a spoken question is answered, not redirected to a slash command', async () => {
@@ -344,6 +344,27 @@ test('an un-anchored account is excluded from the book total, and says so', asyn
   assert.match(out, /excludes 1 un-anchored: gotyme/);
 });
 
+test('tapping ✓ anchor it carries the follow-up question, keyboard and all', async () => {
+  // The regression this exists for: callback() used to return a bare string, so the
+  // keyboard anchorAccount attaches to a first anchor was dropped and the multi-line text
+  // was crammed into a 200-char toast. The one question the design can only ask once per
+  // account arrived as nothing at all.
+  const db = await fresh();
+  await db.run(
+    `INSERT INTO events (type, book, account_id, amount_centavos, category, occurred_at, logged_at)
+     VALUES ('expense','personal','cash',-25000,'food','2026-09-03','2026-09-03T00:00:00Z')`,
+  );
+
+  const r = await callback(db, 'snap:cash:150000', '2026-09-03');
+  assert.match(r.text, /already logged ₱250\.00/);
+  assert.ok(r.keyboard, 'the tap must be able to ask another question');
+  assert.equal(r.keyboard![1][0].callback_data, 'anchorsub:cash:-25000');
+  assert.notEqual(r.advice, true, 'an anchor is an action, so its buttons must be retired');
+
+  // Guidance is the exception: it leaves the row's buttons alone, because you may not follow through.
+  assert.equal((await callback(db, 'fix:1', '2026-09-03')).advice, true);
+});
+
 test('the first anchor asks whether the count was before or after logged spending', async () => {
   // Nothing in the data distinguishes "₱1,500 is in my wallet now, after the ₱250" from
   // "₱1,500 is what I had before it". The two differ by exactly that ₱250, so guessing
@@ -363,12 +384,12 @@ test('the first anchor asks whether the count was before or after logged spendin
   assert.equal(r.keyboard![1][0].callback_data, 'anchorsub:cash:-25000');
 
   // Counted-after: the anchor stands alone, spending stays in the recap only.
-  assert.match(await callback(db, 'anchored:cash', '2026-09-03'), /kept as counted/);
+  assert.match((await callback(db, 'anchored:cash', '2026-09-03')).text, /Kept as counted/);
   assert.match(await balances(db, accounts, '2026-09-03'), /Cash on hand\s+₱1,500\.00/);
 
   // Counted-before: an explicit adjustment applies it. The anchor itself is never rewritten,
   // so the ledger records why the balance differs from the figure that was typed.
-  assert.match(await callback(db, 'anchorsub:cash:-25000', '2026-09-03'), /balance is now ₱1,250\.00/);
+  assert.match((await callback(db, 'anchorsub:cash:-25000', '2026-09-03')).text, /balance is now ₱1,250\.00/);
   assert.match(await balances(db, accounts, '2026-09-03'), /Cash on hand\s+₱1,250\.00/);
 
   const [anchor] = await db.all<{ balance_centavos: number }>(
