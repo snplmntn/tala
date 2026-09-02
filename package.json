@@ -8,12 +8,13 @@
   },
   "scripts": {
     "start": "tsx src/index.ts",
-    "dev": "tsx watch src/index.ts",
+    "dev": "node --env-file=.env --import tsx --watch src/index.ts",
     "migrate": "turso db shell $TURSO_DB < schema.sql",
     "test": "node --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
     "format": "prettier --check .",
-    "format:write": "prettier --write ."
+    "format:write": "prettier --write .",
+    "local": "node --env-file=.env --import tsx src/index.ts"
   },
   "dependencies": {
     "@libsql/client": "^0.15.15"
