@@ -1,0 +1,50 @@
+name: backup
+
+# Runs in Actions rather than on the laptop: Turso's free point-in-time window is 1 day,
+# so a Mac closed for a fortnight would leave the ledger with zero recoverable copies.
+# The daily commit is also the repo activity that stops Actions auto-disabling this schedule.
+on:
+  schedule:
+    - cron: '30 17 * * *' # 01:30 Asia/Manila
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: backup
+  cancel-in-progress: false
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      - name: Dump and encrypt
+        env:
+          TURSO_URL: ${{ secrets.TURSO_URL }}
+          TURSO_TOKEN: ${{ secrets.TURSO_TOKEN }}
+          AGE_PUBLIC_KEY: ${{ secrets.AGE_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq age
+          # Plaintext in git is effectively unrevocable — one visibility flip, one leaked
+          # token, one stolen clone reads every transaction ever recorded.
+          npx tsx scripts/backup.ts | age -r "$AGE_PUBLIC_KEY" > backup/ledger.sql.age
+          ls -l backup/ledger.sql.age
+
+      - name: Commit if changed
+        run: |
+          set -euo pipefail
+          git config user.name  "tala-backup"
+          git config user.email "tala-backup@users.noreply.github.com"
+          git add backup/ledger.sql.age
+          # One file, overwritten — git already keeps every version.
+          git diff --cached --quiet || git commit -m "backup: $(date -u +%Y-%m-%d)"
+          git push

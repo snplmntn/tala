@@ -1,0 +1,312 @@
+/**
+ * Tala. One process: a Telegram long-poll loop, a Manila-midnight daily line, and a bare
+ * health endpoint for the keep-alive ping that stops Render's free tier spinning down.
+ *
+ * Deliberately NOT a webhook. Render needs a public endpoint anyway for the ping, and this
+ * way that endpoint writes nothing — there is no URL to POST a forged `correction` intent
+ * to, so the secret-token check and the random path stop existing rather than being got
+ * right. And if the instance is asleep or redeploying, Telegram HOLDS the updates and the
+ * next poll drains them, where a webhook would retry with backoff and then discard.
+ */
+
+import { createServer } from 'node:http';
+import { Db } from './db.ts';
+import { extract } from './extract.ts';
+import { addDays, dayDiff, manilaDate, peso } from './ledger.ts';
+import { applyEvent, balances, callback, csv, recap, snapshot, undo } from './handlers.ts';
+import {
+  answerCallback,
+  deleteWebhook,
+  getUpdates,
+  photoAsDataUrl,
+  send,
+  sendCsv,
+  senderId,
+  type Update,
+} from './telegram.ts';
+
+const env = (k: string): string => {
+  const v = process.env[k];
+  if (!v) throw new Error(`missing env: ${k}`);
+  return v;
+};
+
+const TOKEN = env('TELEGRAM_TOKEN');
+const OWNER = Number(env('OWNER_CHAT_ID'));
+const GROQ = env('GROQ_API_KEY');
+const db = new Db(env('TURSO_URL'), env('TURSO_TOKEN'));
+
+const today = () => manilaDate(new Date());
+const log = (...a: unknown[]) => console.log(new Date().toISOString(), ...a);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The guard. First thing, before any parse, any LLM call, any write.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Bot usernames are publicly searchable, so a stranger can message this bot. Without the
+ * allowlist their message writes real rows — and the quota damage lands first: one stranger
+ * at Groq's 30 RPM ceiling exhausts 1,000 requests/day in about 33 minutes and the bot is
+ * dead until UTC midnight.
+ *
+ * senderId() reads callback_query.from, not .chat — callback_query has no `.chat`, and that
+ * is the row-mutating path a naive check leaves wide open while looking like it authenticates.
+ * Unauthorised senders get silence, never an "unauthorized" reply that confirms the bot exists.
+ */
+const authorised = (u: Update): boolean => senderId(u) === OWNER;
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function handle(u: Update): Promise<void> {
+  if (!authorised(u)) {
+    log('ignored update from', senderId(u));
+    return;
+  }
+
+  if (u.callback_query) {
+    const msg = await callback(db, u.callback_query.data ?? '', today());
+    await answerCallback(TOKEN, u.callback_query.id, msg);
+    return;
+  }
+
+  const m = u.message ?? u.edited_message;
+  if (!m) return;
+
+  // A `document` ships original bytes with home and campus GPS intact. Telegram re-encodes
+  // `photo`, which is what strips EXIF, so only photos are accepted.
+  if (m.document) {
+    await send(TOKEN, m.chat.id, 'Send receipts as a photo, not a file — a file keeps its GPS metadata.');
+    return;
+  }
+
+  const text = (m.text ?? m.caption ?? '').trim();
+  const hasPhoto = !!m.photo?.length;
+
+  // Deterministic commands never reach the LLM. The anchor in particular is the one number
+  // the design trusts unconditionally, so it does not go through a probabilistic parser.
+  if (!hasPhoto && text.startsWith('/')) {
+    const [cmd, ...rest] = text.split(/\s+/);
+    const accounts = await db.accounts();
+    switch (cmd) {
+      case '/start':
+      case '/help':
+        return void (await send(TOKEN, m.chat.id, HELP));
+      case '/balance':
+        return void (await send(TOKEN, m.chat.id, await balances(db, accounts, today())));
+      case '/recap':
+        return void (await send(TOKEN, m.chat.id, await recap(db, accounts, rest[0] ?? today().slice(0, 7))));
+      case '/snap':
+      case '/snapshot': {
+        const r = await snapshot(db, accounts, rest.join(' '), today());
+        return void (await send(TOKEN, m.chat.id, r.text, r.keyboard));
+      }
+      case '/undo':
+        return void (await send(TOKEN, m.chat.id, await undo(db)));
+      case '/csv':
+        return void (await sendCsv(TOKEN, m.chat.id, `tala-${today()}.csv`, await csv(db)));
+    }
+  }
+
+  // Claim the update BEFORE the LLM call. A duplicate delivery stops here; a provider
+  // outage leaves a row we can replay instead of an expense you watched vanish.
+  const inboxId = await db.claim({
+    update_id: u.update_id,
+    message_id: m.message_id,
+    chat_id: m.chat.id,
+    text: text || null,
+    has_photo: hasPhoto,
+    now: new Date().toISOString(),
+  });
+  if (inboxId == null) {
+    log('duplicate update', u.update_id);
+    return;
+  }
+
+  const accounts = await db.accounts();
+  let parsed;
+  try {
+    const imageDataUrl = hasPhoto ? await photoAsDataUrl(TOKEN, m.photo!) : null;
+    parsed = await extract(
+      GROQ,
+      accounts.map((a) => a.id),
+      { text, imageDataUrl },
+      today(),
+    );
+    await db.markInbox(inboxId, 'parsed', { model: parsed.model, raw: parsed.raw });
+  } catch (e) {
+    // Deferred, not lost. The raw text is on disk and /retry replays it.
+    await db.markInbox(inboxId, 'deferred', { error: String(e).slice(0, 400) });
+    await send(
+      TOKEN,
+      m.chat.id,
+      `Saved your message but couldn't read it yet (${String(e).slice(0, 80)}). It will be retried — nothing is lost.`,
+    );
+    return;
+  }
+
+  for (const ev of parsed.events) {
+    const r = await applyEvent(db, accounts, ev, {
+      inboxId,
+      today: today(),
+      messageId: m.message_id,
+      hadPhoto: hasPhoto,
+    });
+    await send(TOKEN, m.chat.id, r.text, r.keyboard);
+  }
+  await db.markInbox(inboxId, 'applied');
+}
+
+const HELP = `Tala — say what you spent.
+
+  250 jollibee maribank
+  jeep 15, load 50, lunch 90 gcash
+  600 dinner maribank, 400 not mine
+  sent 2k from maya to gotyme, fee 10
+  the jollibee was 285 not 250
+  (or send a receipt photo)
+
+/balance   confirmed vs expected, per book
+/recap     this month, or /recap 2026-08
+/snap      anchor a balance: /snap maya 98000
+/undo      void the last entry
+/csv       the whole ledger as a spreadsheet`;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The daily line. The single carrier for every alarm.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Without this the error-detection loop is thirty days long: a wrong account or a missing
+ * transfer leg on the 3rd stays invisible until the 1st, by which point you cannot remember
+ * the transactions well enough to attribute the drift. That is the difference between "that
+ * was the Grab ride" and an unexplained ₱430 adjustment.
+ *
+ * It is also its own dead-man switch, which is why no external watchdog is needed: a daily
+ * message that stops arriving IS the alarm.
+ */
+async function dailyLine(): Promise<void> {
+  const accounts = await db.accounts();
+  const t = today();
+  const body = await balances(db, accounts, t);
+
+  const ages = await Promise.all(
+    accounts.map(async (a) => {
+      const s = await db.latestSnapshot(a.id);
+      return s ? dayDiff(s.as_of_date, t) : 999;
+    }),
+  );
+  const stalest = Math.max(...ages);
+  const nudge = stalest >= 28 ? `\n\nAnchors are ${stalest}d old — time to /snap.` : '';
+  await send(TOKEN, OWNER, `${t}\n${body}${nudge}`);
+}
+
+/** Retry whatever a provider outage deferred, so nothing sits in the inbox forever. */
+async function retryDeferred(): Promise<void> {
+  const rows = await db.deferred();
+  if (!rows.length) return;
+  const accounts = await db.accounts();
+  for (const row of rows) {
+    try {
+      const parsed = await extract(
+        GROQ,
+        accounts.map((a) => a.id),
+        { text: row.raw_text },
+        today(),
+      );
+      await db.markInbox(row.id, 'parsed', { model: parsed.model, raw: parsed.raw });
+      for (const ev of parsed.events) {
+        const r = await applyEvent(db, accounts, ev, { inboxId: row.id, today: today(), hadPhoto: false });
+        await send(TOKEN, OWNER, `(retried) ${r.text}`, r.keyboard);
+      }
+      await db.markInbox(row.id, 'applied');
+    } catch (e) {
+      log('retry still failing', row.id, String(e).slice(0, 120));
+      return; // still down; leave the rest for the next tick
+    }
+  }
+}
+
+/**
+ * Manila midnight, computed rather than configured.
+ *
+ * A cron expression would have to be UTC (`0 16 * * *`) and would silently be wrong if the
+ * offset ever changed. Checking the Manila civil date every minute is smaller than that and
+ * cannot drift — and it survives the process restarting at any hour, because the marker is
+ * the date itself, not a timer.
+ */
+function scheduler(): void {
+  let lastRun = today(); // do not fire on boot
+  setInterval(() => {
+    void (async () => {
+      try {
+        const t = today();
+        if (t !== lastRun) {
+          lastRun = t;
+          await dailyLine();
+        }
+        await retryDeferred();
+      } catch (e) {
+        log('scheduler', e);
+      }
+    })();
+  }, 60_000).unref?.();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The loop.
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function poll(): Promise<never> {
+  // The offset comes from the ledger itself: max(telegram_update_id) + 1. No extra table,
+  // and a restart resumes exactly where it left off rather than replaying a day.
+  const row = await db.one<{ n: number | null }>('SELECT MAX(telegram_update_id) AS n FROM inbox');
+  let offset = (row?.n ?? 0) + 1;
+  log('polling from offset', offset);
+
+  let backoff = 1000;
+  for (;;) {
+    try {
+      const updates = await getUpdates(TOKEN, offset);
+      backoff = 1000;
+      for (const u of updates) {
+        offset = Math.max(offset, u.update_id + 1);
+        try {
+          await handle(u);
+        } catch (e) {
+          // A DM is the error tracker. Nobody opens a hosting dashboard for a personal bot.
+          log('handle', u.update_id, e);
+          await send(TOKEN, OWNER, `error on update ${u.update_id}: ${String(e).slice(0, 300)}`).catch(
+            () => {},
+          );
+        }
+      }
+    } catch (e) {
+      log('poll', String(e).slice(0, 200));
+      await new Promise((r) => setTimeout(r, backoff));
+      backoff = Math.min(backoff * 2, 60_000);
+    }
+  }
+}
+
+/**
+ * The keep-alive surface, and nothing else. Render's free tier spins down after 15 minutes
+ * of inactivity, so an external pinger (cron-job.org, GitHub Actions, UptimeRobot) hits
+ * /healthz every ~10 minutes. Every other path is a bare 404 — no bodies, no hints.
+ */
+function health(): void {
+  const port = Number(process.env.PORT ?? 3000);
+  createServer((req, res) => {
+    if (req.method === 'GET' && req.url === '/healthz') {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end('ok');
+      return;
+    }
+    res.writeHead(404).end();
+  }).listen(port, () => log('health on', port));
+}
+
+// Long-polling and a webhook are mutually exclusive; clear one left by an earlier deploy.
+await deleteWebhook(TOKEN);
+health();
+scheduler();
+await poll();

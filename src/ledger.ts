@@ -1,0 +1,490 @@
+/**
+ * The pure core. No I/O, no D1, no fetch — every function here is a fold over rows,
+ * which is what makes the whole ledger testable without an API key or a database.
+ *
+ * The LLM never reaches this file. It converts prose to a typed event; this applies events.
+ */
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Money. Integer centavos, always.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Parse a written amount into centavos. Accepts "1,234.56", "P1234.56", "₱1.2k", "250".
+ * Returns null on anything it cannot read exactly — the caller then asks rather than guesses,
+ * because a silently wrong amount is the one error the reconciliation row cannot distinguish
+ * from forgotten spending.
+ */
+export function parseAmount(raw: string | null | undefined): number | null {
+  if (!raw) return null;
+  let s = String(raw)
+    .trim()
+    .toLowerCase()
+    .replace(/[₱p]|php|pesos?/g, '')
+    .replace(/,/g, '')
+    .trim();
+
+  let mult = 1;
+  const k = s.match(/^(-?\d+(?:\.\d+)?)\s*k$/);
+  if (k) {
+    s = k[1];
+    mult = 1000;
+  }
+  if (!/^-?\d+(\.\d{1,2})?$/.test(s)) return null;
+
+  // Scale as a string to avoid float error: 0.1 + 0.2 has no place near money.
+  const neg = s.startsWith('-');
+  const [whole, frac = ''] = (neg ? s.slice(1) : s).split('.');
+  const centavos = Number(whole) * 100 + Number((frac + '00').slice(0, 2));
+  const out = centavos * mult;
+  if (!Number.isSafeInteger(out)) return null;
+  return neg ? -out : out;
+}
+
+export function peso(centavos: number): string {
+  const neg = centavos < 0;
+  const a = Math.abs(centavos);
+  const s = `${Math.floor(a / 100).toLocaleString('en-US')}.${String(a % 100).padStart(2, '0')}`;
+  return `${neg ? '-' : ''}₱${s}`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Time. Manila civil dates, because Workers have no local timezone.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const MANILA = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'Asia/Manila',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+});
+
+/** The Manila civil date (YYYY-MM-DD) of an instant. Every boundary in Tala keys on this. */
+export function manilaDate(at: Date): string {
+  return MANILA.format(at);
+}
+
+/** Shift a YYYY-MM-DD civil date by whole days. No timezone involved — pure calendar. */
+export function addDays(date: string, n: number): string {
+  const [y, m, d] = date.split('-').map(Number);
+  const t = Date.UTC(y, m - 1, d) + n * 86_400_000;
+  return new Date(t).toISOString().slice(0, 10);
+}
+
+/** Whole days from `a` to `b`, positive when b is later. */
+export function dayDiff(a: string, b: string): number {
+  const p = (s: string) => {
+    const [y, m, d] = s.split('-').map(Number);
+    return Date.UTC(y, m - 1, d);
+  };
+  return Math.round((p(b) - p(a)) / 86_400_000);
+}
+
+/** Inclusive list of civil dates. Bounded by callers to a snapshot period, never a year. */
+export function daysBetween(from: string, to: string): string[] {
+  const out: string[] = [];
+  for (let d = from; dayDiff(d, to) >= 0; d = addDays(d, 1)) out.push(d);
+  return out;
+}
+
+export const monthOf = (date: string): string => date.slice(0, 7);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Events and correction resolution.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type EventType = 'expense' | 'income' | 'transfer' | 'interest' | 'cashback' | 'adjustment';
+
+export interface Event {
+  id: number;
+  inbox_id?: number | null;
+  type: EventType;
+  book: string;
+  account_id: string;
+  amount_centavos: number;
+  category?: string | null;
+  merchant?: string | null;
+  note?: string | null;
+  recurrence?: string;
+  shared_amount_centavos?: number | null;
+  settled_at?: string | null;
+  transfer_id?: string | null;
+  fee_centavos?: number | null;
+  occurred_at: string;
+  logged_at: string;
+  corrects_id?: number | null;
+  confirmed_at?: string | null;
+  telegram_message_id?: number | null;
+  voided_at?: string | null;
+}
+
+export const rootId = (e: Event): number => e.corrects_id ?? e.id;
+
+/**
+ * Resolve a correction chain to one effective row per root.
+ *
+ * A correction is a FULL SUPERSEDE carrying the complete corrected payload, so the
+ * effective row is simply the highest-id row in each chain. Two consequences worth the
+ * design: a replayed correction is a no-op (idempotent by construction, so no dedupe
+ * logic exists anywhere), and aggregates never show 250 and 285 as two expenses.
+ *
+ * Voided rows drop out entirely, and voiding the root voids the chain.
+ */
+export function effective(rows: Event[]): Event[] {
+  const byRoot = new Map<number, Event>();
+  const voidedRoots = new Set<number>();
+
+  for (const r of rows) {
+    if (r.voided_at) {
+      voidedRoots.add(rootId(r));
+      continue;
+    }
+    const root = rootId(r);
+    const cur = byRoot.get(root);
+    if (!cur || r.id > cur.id) byRoot.set(root, r);
+  }
+  for (const root of voidedRoots) byRoot.delete(root);
+  return [...byRoot.values()];
+}
+
+/** Sum of signed amounts. Negative leaves the account, positive enters it. */
+export const sum = (rows: Event[]): number => rows.reduce((t, r) => t + r.amount_centavos, 0);
+
+const inWindow = (d: string, after: string, upto: string) => dayDiff(after, d) > 0 && dayDiff(d, upto) >= 0;
+
+/** Effective rows for one account inside (after, upto]. */
+export function windowFor(rows: Event[], accountId: string, after: string, upto: string): Event[] {
+  return effective(rows).filter((r) => r.account_id === accountId && inWindow(r.occurred_at, after, upto));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The accrual fold. ONE implementation, shared by the projection and the rate learner —
+// two implementations of centavo-days is the exact bug this exists to prevent.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface RateConfig {
+  rate: number; // net annual, on the capped slice
+  rate_floor: number; // net annual, on the excess above the cap
+  rate_cap_centavos?: number | null; // null = no cap, whole balance earns `rate`
+}
+
+/**
+ * One day's credited interest on an end-of-previous-day balance.
+ *
+ * Rounded per day, not once per period: the bank rounds thirty times and we must too, or
+ * drift is never zero even on a perfectly logged month. The capped and excess slices round
+ * separately because that is how the credits actually post — Maya lands two rows a day.
+ *
+ * Base clamped at zero: the pass-through wallet model actively invites a negative pot
+ * balance, and a negative base would fabricate negative interest that then feeds the
+ * true-up and the learner.
+ */
+export function dailyInterest(balance: number, r: RateConfig): number {
+  const base = Math.max(0, balance);
+  if (base === 0 || r.rate <= 0) return 0;
+  const cap = r.rate_cap_centavos;
+  if (cap == null || base <= cap) return Math.round((base * r.rate) / 365);
+  return Math.round((cap * r.rate) / 365) + Math.round(((base - cap) * r.rate_floor) / 365);
+}
+
+export interface Accrual {
+  interest: number; // centavos credited across the period
+  balance: number; // closing balance including credited interest
+  centavoDays: number; // sum of daily bases — the learner's denominator
+  days: number;
+}
+
+/**
+ * Accrue from the snapshot anchor forward, day by day.
+ *
+ * `from` is the snapshot's as_of_date and `opening` is its balance at the end of that day.
+ * Interest for day D is computed on the balance at the end of D-1 (both banks publish that
+ * convention) and credited into the balance, so it compounds — realised yield sits a few
+ * basis points above the simple rate, which is expected and must not be read as drift.
+ *
+ * `to` should be YESTERDAY, not today: today's interest is credited tomorrow on today's
+ * close, so accruing through yesterday is exactly the confirmed portion. That is what makes
+ * "confirmed matches the banking app" true without a cadence column.
+ *
+ * ponytail: credits are attributed to the day they are earned, not the day they post, so a
+ * single day's boundary can differ from the app by one day's interest (~P21 on Maya). Model
+ * the post lag only if the snapshot check ever disagrees by exactly that.
+ */
+export function accrue(
+  opening: number,
+  from: string,
+  to: string,
+  flowsByDate: Map<string, number>,
+  r: RateConfig,
+): Accrual {
+  let balance = opening;
+  let interest = 0;
+  let centavoDays = 0;
+  let days = 0;
+
+  for (const day of daysBetween(addDays(from, 1), to)) {
+    const base = Math.max(0, balance);
+    centavoDays += base;
+    const earned = dailyInterest(base, r);
+    interest += earned;
+    balance = balance + earned + (flowsByDate.get(day) ?? 0);
+    days++;
+  }
+  return { interest, balance, centavoDays, days };
+}
+
+/** Flows keyed by Manila date, excluding interest and cashback (the accrual generates those). */
+export function flowsByDate(rows: Event[]): Map<string, number> {
+  const m = new Map<string, number>();
+  for (const r of rows) {
+    if (r.type === 'interest' || r.type === 'cashback') continue;
+    m.set(r.occurred_at, (m.get(r.occurred_at) ?? 0) + r.amount_centavos);
+  }
+  return m;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Balances. Two figures, and the distinction is the whole point.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface Balance {
+  accountId: string;
+  confirmed: number; // anchor + logged flows + interest already credited. Matches the app.
+  accrued: number; // today's uncredited slice. Always small under daily crediting.
+  expected: number; // confirmed + accrued
+  anchorDate: string | null;
+  anchorAgeDays: number | null;
+  estimated: boolean; // true while rate_source is still 'seeded_net'
+}
+
+/**
+ * Pending rows ALWAYS count. Status is presentational and the 24h settle changes no
+ * arithmetic — which deletes the filtering that would otherwise make an Aug 31 23:00
+ * expense appear in the August recap on Sep 2 but not on Sep 1.
+ */
+export function balanceOf(
+  account: {
+    id: string;
+    rate: number;
+    rate_floor: number;
+    rate_cap_centavos?: number | null;
+    rate_source: string;
+  },
+  anchor: { as_of_date: string; balance_centavos: number } | null,
+  rows: Event[],
+  today: string,
+): Balance {
+  if (!anchor) {
+    const all = effective(rows).filter((r) => r.account_id === account.id);
+    return {
+      accountId: account.id,
+      confirmed: sum(all),
+      accrued: 0,
+      expected: sum(all),
+      anchorDate: null,
+      anchorAgeDays: null,
+      estimated: account.rate > 0,
+    };
+  }
+
+  const yesterday = addDays(today, -1);
+  const rowsIn = windowFor(rows, account.id, anchor.as_of_date, today);
+
+  // Generated interest and observed interest must never both count for the same day.
+  // Fold forward from whichever is later: the anchor, or the last credit actually reported.
+  // One expression handles both "I never log credits" and "I logged one on the 3rd",
+  // without tracking a set of covered days.
+  const credits = rowsIn.filter((r) => r.type === 'interest' || r.type === 'cashback');
+  const foldStart = credits.reduce(
+    (a, r) => (dayDiff(a, r.occurred_at) > 0 ? r.occurred_at : a),
+    anchor.as_of_date,
+  );
+  const upTo = (d: string) =>
+    sum(rowsIn.filter((r) => dayDiff(r.occurred_at, foldStart) >= 0 && r.occurred_at <= d));
+
+  const openingAtFold = anchor.balance_centavos + upTo(foldStart);
+  const after = rowsIn.filter((r) => dayDiff(foldStart, r.occurred_at) > 0);
+  const folded = accrue(openingAtFold, foldStart, yesterday, flowsByDate(after), account);
+
+  // accrue() applies flows dated foldStart+1 .. yesterday; today's own rows land after it.
+  const todaysFlows = sum(after.filter((r) => r.occurred_at === today));
+  const confirmed = folded.balance + todaysFlows;
+  const accrued = dailyInterest(confirmed, account); // today's slice, credited tomorrow
+
+  return {
+    accountId: account.id,
+    confirmed,
+    accrued,
+    expected: confirmed + accrued,
+    anchorDate: anchor.as_of_date,
+    anchorAgeDays: dayDiff(anchor.as_of_date, today),
+    estimated: account.rate > 0 && account.rate_source === 'seeded_net',
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Reconciliation. The identity, and the drift it measures.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * drift = actual - (previous anchor + everything logged in between)
+ *
+ * Positive drift means money appeared: untracked interest, a promo credit, or an unlogged
+ * inflow. Negative means it left: a fee, an unlogged expense, a missing transfer leg.
+ *
+ * The number is only useful once it is TAGGED. Untagged, a duplicate row, a P10 InstaPay
+ * fee, a missing transfer leg, a snapshot typo and "I forgot to log things" are
+ * mathematically identical — and net worth ties to the centavo while the category totals
+ * you actually decide with are understated by exactly this.
+ */
+export function drift(
+  prev: { as_of_date: string; balance_centavos: number },
+  next: { as_of_date: string; balance_centavos: number },
+  rows: Event[],
+  accountId: string,
+): number {
+  const between = windowFor(rows, accountId, prev.as_of_date, next.as_of_date);
+  return next.balance_centavos - (prev.balance_centavos + sum(between));
+}
+
+/**
+ * Where a backdated entry must land.
+ *
+ * Booking it to its real date would put an expense into a period whose adjustment row
+ * already accounted for it — August would carry both, September's drift would come out
+ * +800 and cancel, and the same August recap would give a different answer depending on
+ * when you ran it. So: keep the true date in the note, book the row to the open period.
+ */
+export function bookingDate(
+  occurredAt: string,
+  latestAnchor: string | null,
+): { date: string; lateFor: string | null } {
+  if (!latestAnchor || dayDiff(occurredAt, latestAnchor) < 0) return { date: occurredAt, lateFor: null };
+  return { date: addDays(latestAnchor, 1), lateFor: occurredAt };
+}
+
+/**
+ * A late entry is a RECLASSIFICATION, not a flow.
+ *
+ * The subtle half of the late-entry rule, and the one that actually bites. If the money
+ * left on 28 August and the anchor was read on 31 August, the anchor balance ALREADY
+ * contains it — and August's adjustment row already absorbed it as untagged drift.
+ * Booking it as a fresh September flow double-counts it: September's derived balance comes
+ * out low, September's drift comes out positive by the same amount and cancels August's,
+ * and you end up with today's net worth right and every historical month wrong.
+ *
+ * So it books as a PAIR that nets to zero on the balance: the categorised row, plus an
+ * offsetting adjustment whose note says where it came from. The category recap gains the
+ * spend, the balance does not move, and the ledger explains itself without a new column.
+ *
+ * A genuinely NEW expense in the open period is not this — it is one ordinary row.
+ */
+export function lateEntryPair<T extends { amount_centavos: number; note?: string | null }>(
+  row: T,
+  lateFor: string,
+): [T, T & { type: 'adjustment'; category: string }] {
+  const tagged = { ...row, note: `late entry for ${lateFor}${row.note ? ` · ${row.note}` : ''}` };
+  const offset = {
+    ...tagged,
+    type: 'adjustment' as const,
+    category: 'reclassified',
+    amount_centavos: -row.amount_centavos,
+    note: `reclassified from drift before ${lateFor}`,
+  };
+  return [tagged, offset];
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The rate learner, with all three guards.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface LearnResult {
+  accepted: boolean;
+  rate: number; // the rate to store (the seed, unchanged, when rejected)
+  implied: number;
+  reason: string;
+}
+
+/**
+ * Learn a net rate from observed credits, or refuse and say so.
+ *
+ * The denominator is the accrual's own centavo-days. The design originally accrued on the
+ * opening balance while dividing by the average — two denominators, so the formula error
+ * gets fitted AS rate signal, rate_source flips to 'observed', and the good seed is gone
+ * permanently. Maya at P10,000 with P5,000 spent on the 15th: true P61.64 against P82.19
+ * by the opening-balance method, 33% over.
+ *
+ * Three guards, each for a failure that actually happens:
+ *  - centavoDays near zero divides by a user-controlled number: a P5 residual credit on a
+ *    P50 average yields 120% p.a., written as authoritative and never pulled back.
+ *  - A result outside [0, 2x seed] is a mis-typed credit, not a rate change.
+ *  - Two observations minimum, because one month can be a partial period.
+ *
+ * Callers must SUM same-day credit rows before passing `credited`. Maya posts base and
+ * boost as separate rows, and a learner reading them as separate days converges on 2.4%
+ * or 5.6% from a perfectly correct 8% seed — the likeliest way a right seed still breaks.
+ */
+export function learnRate(
+  credited: number,
+  centavoDays: number,
+  seed: number,
+  observationCount: number,
+): LearnResult {
+  const floor = 100_000; // P1,000 of centavo-days: below this the quotient is meaningless
+  if (centavoDays < floor)
+    return { accepted: false, rate: seed, implied: 0, reason: 'balance too small to infer a rate' };
+  if (credited < 0) return { accepted: false, rate: seed, implied: 0, reason: 'negative credit' };
+
+  const implied = (credited * 365) / centavoDays;
+  if (implied > seed * 2)
+    return { accepted: false, rate: seed, implied, reason: 'implied rate more than double the seed' };
+  if (observationCount < 2)
+    return { accepted: false, rate: seed, implied, reason: 'need a second observation' };
+
+  return { accepted: true, rate: implied, implied, reason: 'learned from observed credits' };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Integrity checks. The only mechanisms that tell a real bug from ordinary drift.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * A transfer must be exactly two rows summing to zero. Without this check a half-logged
+ * transfer produces two opposite drifts whose adjustments cancel — the design self-heals
+ * into looking correct while two accounts were wrong by P3,000 all month.
+ */
+export function brokenTransfers(rows: Event[]): string[] {
+  const legs = new Map<string, Event[]>();
+  for (const r of effective(rows)) {
+    if (!r.transfer_id) continue;
+    const group = legs.get(r.transfer_id);
+    if (group) group.push(r);
+    else legs.set(r.transfer_id, [r]);
+  }
+  const bad: string[] = [];
+  for (const [id, group] of legs) {
+    // The fee leg is a third row by design, so net-to-zero is checked on the two transfer legs.
+    const transferLegs = group.filter((r) => r.type === 'transfer');
+    if (transferLegs.length !== 2 || sum(transferLegs) !== 0) bad.push(id);
+  }
+  return bad;
+}
+
+/** Fronted money nobody has paid back yet. Reported as ONE aggregate, never a chase list. */
+export function unsettled(rows: Event[]): number {
+  return effective(rows)
+    .filter((r) => (r.shared_amount_centavos ?? 0) > 0 && !r.settled_at)
+    .reduce((t, r) => t + (r.shared_amount_centavos ?? 0), 0);
+}
+
+/** Spend per category over effective rows, net of refunds and of other people's money. */
+export function spendByCategory(rows: Event[]): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const r of effective(rows)) {
+    if (r.type !== 'expense') continue;
+    const mine = -r.amount_centavos - (r.shared_amount_centavos ?? 0);
+    const key = r.category ?? 'other';
+    out.set(key, (out.get(key) ?? 0) + mine);
+  }
+  return out;
+}

@@ -1,0 +1,27 @@
+# Render free tier. The service spins down after 15 minutes idle, so an external pinger
+# must hit /healthz every ~10 minutes (cron-job.org, UptimeRobot, or a GitHub Actions cron).
+# Render's own cron jobs are paid, which is why the daily line is an in-process scheduler
+# and the backup lives in GitHub Actions.
+#
+# Note: keeping one service alive 24/7 uses ~730 of the account's 750 free instance-hours
+# per month, so this is the only free service that can run continuously here.
+services:
+  - type: web
+    name: tala
+    runtime: node
+    plan: free
+    region: singapore # closest to Manila; Render has no PH region
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: OWNER_CHAT_ID
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: TURSO_URL
+        sync: false
+      - key: TURSO_TOKEN
+        sync: false
