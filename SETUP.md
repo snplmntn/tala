@@ -175,7 +175,7 @@ to undo. One value you set once has no race at all.
 Do this before Render. A local restart is one second; a Render redeploy is two minutes.
 
 ```bash
-npm test          # must be 47/47 before you trust any number it shows you
+npm test          # must be 49/49 before you trust any number it shows you
 npm run typecheck
 ```
 
@@ -236,6 +236,8 @@ the jollibee was 285 not 250 -> echoes the matched row: "jollibee, 2026-..., ₱
 600 dinner maribank, 400 not mine
 sent 2k from maya to gotyme, fee 10
 /balance -> confirmed vs expected, per book
+how much do I have -> answers with the balance; no slash command needed
+maya is at 98000 -> PROPOSES an anchor; nothing is written until you tap confirm
 /interest maya 21.48 -> records the credit and learns the rate from it
 /rate -> every rate, and whether it is estimated or observed
 /undo -> voids the last entry
