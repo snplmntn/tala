@@ -175,28 +175,73 @@ to undo. One value you set once has no race at all.
 Do this before Render. A local restart is one second; a Render redeploy is two minutes.
 
 ```bash
-npm test          # 34 asserts — must be 31/31 before you trust any number it shows you
+npm test          # must be 36/36 before you trust any number it shows you
 npm run typecheck
+```
+
+### The fast loop: `npm run chat`
+
+Before touching Telegram at all, talk to the ledger from your terminal:
+
+```bash
+npm run chat
+```
+
+It runs against a **local SQLite file** (`tala-dev.db`), not your real ledger — libSQL takes
+a `file:` URL, so the same client, the same `schema.sql` and the same append-only triggers
+all work with nothing on the network. Type nonsense, break things, `npm run chat -- --reset`
+and start over; your real data is never involved. The only secret it needs is
+`GROQ_API_KEY`, because extraction is the feature and Telegram is only transport.
+
+```
+› 250 jollibee maribank
+₱250.00 · jollibee · Maribank · food
+  buttons: fix:1 void:1 ok:1
+
+› /balance
+› :sql SELECT id,type,amount_centavos,category FROM events
+› :tap ok:1
+› :raw {"intent":"expense","amount":"250", ...}    # skip the LLM entirely
+› :q
+```
+
+`:raw` is the one worth knowing — it applies a hand-written event with no LLM in the loop,
+so you can reproduce a bad parse exactly, or exercise the ledger while Groq is down.
+`npm run chat -- --remote` points at the real Turso ledger; writes are real, so use it only
+to inspect.
+
+This loop found three real bugs the moment it existed, which is the argument for using it
+before Telegram rather than after.
+
+### Then the real thing
+
+```bash
 npm run dev
+```
+
+Long-polling means **no tunnel and no ngrok** — your Mac talks to the real bot directly.
+
 ```
 
 Now walk the real paths in Telegram, in this order:
 
 ```
-/help                          -> the command list
-/snap maya 98000               -> "Maya Savings anchored at ₱98,000.00 as of ..."
-250 jollibee maribank          -> "₱250.00 · jollibee · Maribank · food"  + buttons
-jollibee c1 meal maribank      -> "Maribank — how much?"     (blocks on the MISSING amount)
-250 jollibee                   -> "₱250.00 at jollibee — which account?"  (blocks on account)
-the jollibee was 285 not 250   -> echoes the matched row: "jollibee, 2026-..., ₱250.00 → ₱285.00"
+
+/help -> the command list
+/snap maya 98000 -> "Maya Savings anchored at ₱98,000.00 as of ..."
+250 jollibee maribank -> "₱250.00 · jollibee · Maribank · food" + buttons
+jollibee c1 meal maribank -> "Maribank — how much?" (blocks on the MISSING amount)
+250 jollibee -> "₱250.00 at jollibee — which account?" (blocks on account)
+the jollibee was 285 not 250 -> echoes the matched row: "jollibee, 2026-..., ₱250.00 → ₱285.00"
 600 dinner maribank, 400 not mine
 sent 2k from maya to gotyme, fee 10
-/balance                       -> confirmed vs expected, per book
-/interest maya 21.48           -> records the credit and learns the rate from it
-/rate                          -> every rate, and whether it is estimated or observed
-/undo                          -> voids the last entry
-/csv                           -> the whole ledger as a file
-```
+/balance -> confirmed vs expected, per book
+/interest maya 21.48 -> records the credit and learns the rate from it
+/rate -> every rate, and whether it is estimated or observed
+/undo -> voids the last entry
+/csv -> the whole ledger as a file
+
+````
 
 Then send a **receipt photo**. It should come back asking which account — a receipt carries
 the amount, merchant and date but never says which card paid, so that block _is_ the
@@ -211,7 +256,7 @@ a model's confidence is gating it on a vibe.
 ```bash
 turso db shell tala "UPDATE events SET amount_centavos = 1 WHERE id = 1"
 # -> events are append-only: only voided_at, confirmed_at and settled_at may be set, once
-```
+````
 
 If that _succeeds_, the schema did not load its triggers — re-run step 1. That guard is the
 only thing standing between one late-night `UPDATE` and a broken invariant nothing detects.

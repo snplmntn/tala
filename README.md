@@ -191,9 +191,10 @@ the social-engineering attacks that _do_ move money on PH e-wallets.
 ## Verify
 
 ```bash
-npm test         # 34 asserts, node --test, no framework
+npm test         # 36 asserts, node --test, no framework
 npm run typecheck
 npm run format
+npm run chat     # talk to a local SQLite copy — no Telegram, no bot token, no deploy
 ```
 
 ## Restore drill — do this once, after the first real month
@@ -217,6 +218,7 @@ src/extract.ts      the only place the LLM lives. one fetch, strict JSON schema
 src/telegram.ts     transport. the bot token never leaves this file
 src/handlers.ts     typed events in, rows out
 src/index.ts        long-poll loop, Manila-midnight scheduler, /healthz
+scripts/chat.ts     terminal REPL against a local SQLite file — the fast dev loop
 scripts/backup.ts   portable SQL dump — the backup and the exit from Turso
 test/ledger.test.ts the identity, and the only thing that can falsify it
 ```
