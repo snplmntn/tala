@@ -8,6 +8,8 @@
     "noEmit": true,
     "strict": true,
     "noUncheckedIndexedAccess": false,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "skipLibCheck": true,
     "types": ["node"]
   },

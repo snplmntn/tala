@@ -12,7 +12,7 @@
 import { createServer } from 'node:http';
 import { Db } from './db.ts';
 import { extract, transcript } from './extract.ts';
-import { addDays, dayDiff, manilaDate, peso } from './ledger.ts';
+import { dayDiff, manilaDate } from './ledger.ts';
 import { COMMANDS, applyEvent, balances, callback, runCommand } from './handlers.ts';
 import {
   answerCallback,

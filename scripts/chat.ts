@@ -22,7 +22,7 @@ import { stdin, stdout } from 'node:process';
 import { Db } from '../src/db.ts';
 import { extract, transcript } from '../src/extract.ts';
 import { manilaDate } from '../src/ledger.ts';
-import { HELP, applyEvent, callback, runCommand } from '../src/handlers.ts';
+import { applyEvent, callback, runCommand } from '../src/handlers.ts';
 import { plain } from '../src/telegram.ts';
 
 const args = new Set(process.argv.slice(2));
