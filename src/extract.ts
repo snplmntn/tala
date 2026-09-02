@@ -94,6 +94,12 @@ function schema(accountIds: string[]) {
             intent: {
               type: 'string',
               enum: ['expense', 'income', 'transfer', 'query', 'correction', 'snapshot', 'unknown'],
+              description:
+                "expense = money left an account. income = money arrived. transfer = moved between two of the user's OWN accounts. " +
+                'correction = fixing a PAST entry ("the X was 285 not 250", "that was gcash not maya"). ' +
+                'query = asking a question, not recording anything ("how much do I have", "recap"). ' +
+                'snapshot = REPORTING a current bank balance read from an app ("maya is at 98000", "my maribank shows 12850"). ' +
+                'unknown = only when none of the above fits.',
             },
             // Strings, always. The model transcribes; code parses. It must never compute.
             amount: {
@@ -132,7 +138,11 @@ function schema(accountIds: string[]) {
               ...nullableString,
               description: 'a transfer fee the user mentions, e.g. the ₱10 InstaPay charge',
             },
-            query_kind: { type: ['string', 'null'], enum: ['balance', 'recap', 'owed', 'csv', null] },
+            query_kind: {
+              type: ['string', 'null'],
+              enum: ['balance', 'recap', 'owed', 'csv', null],
+              description: 'ONLY for intent=query. Null for every other intent.',
+            },
             match_amount: {
               ...nullableString,
               description: 'for a correction: the OLD amount, to find the row being corrected',
@@ -164,8 +174,17 @@ HARD RULES:
 - "for myself" means shared_amount is null. Only set shared_amount when the user says they covered others.
 - A refund or money back is intent: expense with a POSITIVE amount and the same category as the original.
 - Set looks_like_transfer: true whenever the wording is sent / moved / transferred / cash-in / padala / load-up, even if you also chose intent: expense. Moving your own money between your accounts is a transfer, not spending.
-- Split multi-item messages into separate events, one per purchase.
+- Split multi-item messages into separate events, one per SEPARATE PURCHASE ("jeep 15, load 50, lunch 90" is three events).
+- But a QUALIFIER about one purchase is NOT a second event. "600 dinner maribank, 400 not mine" is ONE expense of 600 with shared_amount 400. Phrases that mean shared_amount: "N not mine", "N is not mine", "N was theirs", "N is my friend's share", "I paid for N of it". Never emit a separate event for that number.
 - If you cannot tell what the user means, return a single event with intent: unknown.
+
+CHOOSING THE INTENT — this is the part that matters most:
+- Recording a purchase -> expense. Receiving money -> income.
+- Moving money between two of the user's OWN accounts -> transfer, with account = source and to_account = destination. A fee the user mentions goes in the "fee" field, NOT in "category".
+- FIXING SOMETHING ALREADY LOGGED -> correction. Phrases like "the jollibee was 285 not 250", "that was 300", "it was gcash not maya", "wrong amount". Put the OLD amount in match_amount and the merchant in match_merchant so the row can be found, and the NEW amount in amount. Never return an expense for a correction — that would record the purchase twice.
+- ASKING A QUESTION, recording nothing -> query, with query_kind set. "how much do I have" / "what's my balance" -> balance. "recap" / "how much did I spend" -> recap. "who owes me" -> owed. "export" -> csv.
+- REPORTING A BALANCE they just read in their banking app -> snapshot, with account and amount. "maya is at 98000", "maribank shows 12,850", "my gcash balance is 340". This is NOT income and NOT an expense: it is a statement of what an account currently holds.
+- Use unknown ONLY when nothing above fits. Do not fall back to unknown for a question or a balance report.
 
 RECEIPT IMAGES: read merchant, date and the TOTAL. Do not try to read every line item. A receipt never says which card was used, so account must be null.`;
 

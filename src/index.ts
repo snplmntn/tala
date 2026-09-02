@@ -218,9 +218,19 @@ async function dailyLine(): Promise<void> {
   await send(TOKEN, OWNER, `${t}\n${body}${nudge}`);
 }
 
-/** Retry whatever a provider outage deferred, so nothing sits in the inbox forever. */
+/**
+ * Retry whatever a provider outage deferred, so nothing sits in the inbox forever.
+ *
+ * Paced, and this is not theoretical: Groq's free tier caps at 8,000 tokens per MINUTE, and
+ * this prompt is ~1.2k tokens, so roughly six calls a minute. A human typing never notices;
+ * a catch-up loop firing twenty in a row 429s partway and re-defers the rest. So it takes a
+ * few per tick and lets the scheduler come back — the backlog drains over minutes instead of
+ * bouncing off the ceiling every time.
+ */
+const RETRY_PER_TICK = 3;
+
 async function retryDeferred(): Promise<void> {
-  const rows = await db.deferred();
+  const rows = (await db.deferred()).slice(0, RETRY_PER_TICK);
   if (!rows.length) return;
   const accounts = await db.accounts();
   for (const row of rows) {
@@ -238,8 +248,10 @@ async function retryDeferred(): Promise<void> {
       }
       await db.markInbox(row.id, 'applied');
     } catch (e) {
+      // A 429 here is expected under a burst and is not an error worth reporting — the row
+      // stays deferred and the next tick picks it up.
       log('retry still failing', row.id, String(e).slice(0, 120));
-      return; // still down; leave the rest for the next tick
+      return; // still limited or still down; leave the rest for the next tick
     }
   }
 }
