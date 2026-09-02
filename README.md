@@ -65,6 +65,23 @@ pointing at the root plus the complete corrected payload; the effective row is t
 id in the chain. That makes a replayed correction a no-op, so no dedupe logic exists
 anywhere — and a delta would silently turn ₱285 into ₱320 on a retry.
 
+**Talk to it; the slash commands are a shortcut, not the interface.** Logging, transfers,
+corrections and questions all work in prose — `250 jollibee maribank`, `sent 2k to gotyme`,
+`the jollibee was 285 not 250`, `how much do I have`. The extractor classifies the intent
+and read-only questions route straight to the same handler `/balance` uses.
+
+The one exception is **anchoring a balance**, which prose may only _propose_:
+
+```
+you  maya is at 98,000
+bot  Anchor Maya Savings at ₱98,000.00 as of 2026-09-03?   [✓ anchor it] [✗ cancel]
+```
+
+Nothing is written until the tap. The anchor is the one number the whole design trusts
+unconditionally, so a misparse would write a garbage baseline _and_ the phantom adjustment
+row that follows from it, and every later balance would inherit both. Typing
+`/snap maya 98000` skips the confirmation, because a typed command is already deliberate.
+
 **Blocking happens on missing fields, never on uncertain values.** You cannot write a row
 without an amount and an account, so absence is a real gate. "I'm 70% sure it said Jollibee"
 is not, and gating money on a model's confidence is gating it on a vibe. This falls out into
@@ -213,7 +230,7 @@ the social-engineering attacks that _do_ move money on PH e-wallets.
 ## Verify
 
 ```bash
-npm test         # 47 asserts across 2 files, node --test, no framework
+npm test         # 49 asserts across 2 files, node --test, no framework
 npm run typecheck
 npm run format
 npm run chat     # talk to a local SQLite copy — no Telegram, no bot token, no deploy

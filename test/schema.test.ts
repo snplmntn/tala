@@ -17,6 +17,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 import { Db } from '../src/db.ts';
+import { applyEvent, callback } from '../src/handlers.ts';
 
 const SCHEMA = readFileSync(new URL('../schema.sql', import.meta.url), 'utf8');
 
@@ -232,4 +233,90 @@ test('closing an account hides it from the enum but keeps its history', async ()
 
   await db.batch([db.setAccountActive('gcash', true)]);
   assert.equal((await db.accountIds()).includes('gcash'), true, 'and it can be reopened');
+});
+
+// ── prose may PROPOSE an anchor; only a tap writes one ──────────────────────
+
+test('a natural-language anchor writes nothing until confirmed', async () => {
+  // The anchor is the one number the design trusts unconditionally, so a misparse must not
+  // be able to write a garbage baseline plus the phantom adjustment row that follows it.
+  // Prose proposes; a tap commits. This is the same capture-and-confirm rule as reading a
+  // balance off a screenshot.
+  const db = await fresh();
+  const accounts = await db.accounts();
+  const base = {
+    amount: '98,000',
+    account: 'maya',
+    to_account: null,
+    category: null,
+    merchant: null,
+    note: null,
+    date_hint: null,
+    shared_amount: null,
+    recurrence: 'one_off' as const,
+    fee: null,
+    query_kind: null,
+    match_amount: null,
+    match_merchant: null,
+    looks_like_transfer: false,
+  };
+
+  const proposal = await applyEvent(
+    db,
+    accounts,
+    { ...base, intent: 'snapshot' },
+    {
+      inboxId: 1,
+      today: '2026-09-03',
+      hadPhoto: false,
+    },
+  );
+
+  assert.match(proposal.text, /Anchor Maya Savings at ₱98,000\.00/);
+  assert.ok(proposal.keyboard, 'a proposal must offer a confirm button');
+  assert.equal(proposal.keyboard![0][0].callback_data, 'snap:maya:9800000');
+
+  const [before] = await db.all<{ n: number }>('SELECT COUNT(*) AS n FROM snapshots');
+  assert.equal(before.n, 0, 'proposing must not write');
+
+  await callback(db, 'snap:maya:9800000', '2026-09-03');
+  const rows = await db.all<{ account_id: string; balance_centavos: number }>(
+    'SELECT account_id, balance_centavos FROM snapshots',
+  );
+  assert.equal(rows.length, 1, 'the tap writes exactly one anchor');
+  assert.equal(rows[0].balance_centavos, 9_800_000);
+
+  // Cancelling writes nothing either.
+  assert.equal(await callback(db, 'nope', '2026-09-03'), 'cancelled');
+});
+
+test('a spoken question is answered, not redirected to a slash command', async () => {
+  // The extractor already classifies query_kind. Throwing it away and replying "use
+  // /balance" is friction with no correctness argument behind it — a query is read-only.
+  const db = await fresh();
+  const accounts = await db.accounts();
+  const reply = await applyEvent(
+    db,
+    accounts,
+    {
+      intent: 'query',
+      query_kind: 'balance',
+      amount: null,
+      account: null,
+      to_account: null,
+      category: null,
+      merchant: null,
+      note: null,
+      date_hint: null,
+      shared_amount: null,
+      recurrence: 'one_off',
+      fee: null,
+      match_amount: null,
+      match_merchant: null,
+      looks_like_transfer: false,
+    },
+    { inboxId: 1, today: '2026-09-03', hadPhoto: false },
+  );
+  assert.match(reply.text, /Maya Savings/, 'it should answer with the balance itself');
+  assert.doesNotMatch(reply.text, /Ask with/, 'not a pointer to a command');
 });

@@ -71,9 +71,15 @@ export async function applyEvent(
     case 'correction':
       return correct(db, accounts, e, ctx);
     case 'snapshot':
-      return { text: 'To anchor a balance, type it: /snap maya 98000.00 — one account at a time.' };
-    case 'query':
-      return { text: 'Ask with /balance, /recap, /owed or /csv.' };
+      return proposeAnchor(db, accounts, e, ctx.today);
+    case 'query': {
+      // The extractor already classified this, so honour it. A query is read-only: there is
+      // no correctness argument for making you remember a slash command to ask a question.
+      const kind = e.query_kind ?? 'balance';
+      return (
+        (await runCommand(db, accounts, `/${kind}`, ctx.today)) ?? { text: 'Ask me /balance or /recap.' }
+      );
+    }
     default:
       return { text: "Didn't catch that. Try: 250 jollibee maribank" };
   }
@@ -153,6 +159,36 @@ async function money(
     reply.keyboard = [[{ text: '↔ actually a transfer', callback_data: `tx:${id}` }], ...rowKeys(id)];
   }
   return reply;
+}
+
+/**
+ * An anchor asked for in prose is PROPOSED, never written.
+ *
+ * The anchor is the one number the whole design trusts unconditionally: a misparse writes a
+ * garbage baseline AND a phantom adjustment row, and every later balance inherits both. So
+ * the extractor may transcribe a balance it was told, but only a tap commits it — the same
+ * capture-and-confirm rule as reading a balance off a screenshot.
+ *
+ * Refusing outright was the wrong way to enforce that. This keeps the guarantee and drops
+ * the friction.
+ */
+async function proposeAnchor(db: Db, accounts: Account[], e: Extracted, today: string): Promise<Reply> {
+  const account = acct(accounts, e.account);
+  const balance = parseAmount(e.amount);
+  if (!account || balance == null)
+    return { text: `Which account, and what balance? e.g. "maya is at 98,000" or /snap maya 98000` };
+
+  const prev = await db.latestSnapshot(account.id);
+  const was = prev ? ` (was ${peso(prev.balance_centavos)} on ${prev.as_of_date})` : '';
+  return {
+    text: `Anchor ${account.name} at ${peso(balance)} as of ${today}?${was}`,
+    keyboard: [
+      [
+        { text: '✓ anchor it', callback_data: `snap:${account.id}:${balance}` },
+        { text: '✗ cancel', callback_data: 'nope' },
+      ],
+    ],
+  };
 }
 
 // ── transfer ────────────────────────────────────────────────────────────────
@@ -306,6 +342,19 @@ export async function snapshot(db: Db, accounts: Account[], text: string, today:
   const balance = parseAmount(m[2]);
   if (balance == null) return { text: `Couldn't read "${m[2]}" as an amount.` };
 
+  return anchorAccount(db, account, balance, today);
+}
+
+/**
+ * Write an anchor and reconcile against the previous one. Shared by the typed `/snap` and by
+ * a confirmed natural-language proposal, so both take exactly the same path.
+ */
+export async function anchorAccount(
+  db: Db,
+  account: Account,
+  balance: number,
+  today: string,
+): Promise<Reply> {
   const prev = await db.latestSnapshot(account.id);
   const writes = [
     db.putSnapshot({
@@ -504,6 +553,13 @@ export async function callback(db: Db, data: string, today: string): Promise<str
     return `tagged as ${a}`;
   }
 
+  if (kind === 'snap') {
+    const account = (await db.accounts()).find((x) => x.id === a);
+    if (!account) return 'unknown account';
+    const r = await anchorAccount(db, account, Number(b), today);
+    return r.text;
+  }
+  if (kind === 'nope') return 'cancelled';
   if (kind === 'tx') return 'reply: transfer <amount> <from> to <to>, then void the expense';
   if (kind === 'fix') return 'reply with the correction, e.g. "the jollibee was 285 not 250"';
   return 'unknown action';
