@@ -511,8 +511,16 @@ export async function callback(db: Db, data: string, today: string): Promise<str
 export async function undo(db: Db): Promise<string> {
   const last = await db.lastEvent();
   if (!last) return 'nothing to undo';
-  await db.batch([db.voidEvent(last.id, nowIso())]);
-  return `voided: ${last.type} ${peso(Math.abs(last.amount_centavos))} ${last.account_id} ${last.occurred_at}`;
+  // Void every row the same message produced, not just the newest. A late entry writes a
+  // PAIR that nets to zero, and voiding half of it would move the balance the pair exists
+  // to leave alone. Same for a transfer's two legs plus its fee row.
+  const siblings = last.inbox_id
+    ? await db.all<Event>('SELECT * FROM events WHERE inbox_id = ? AND voided_at IS NULL', [last.inbox_id])
+    : [last];
+  await db.batch(siblings.map((r) => db.voidEvent(r.id, nowIso())));
+
+  const extra = siblings.length > 1 ? ` (+${siblings.length - 1} paired)` : '';
+  return `voided: ${last.type} ${peso(Math.abs(last.amount_centavos))} ${last.account_id} ${last.occurred_at}${extra}`;
 }
 
 // ── rates: readable and settable from chat, and learned from real credits ────

@@ -288,7 +288,12 @@ export function balanceOf(
   }
 
   const yesterday = addDays(today, -1);
-  const rowsIn = windowFor(rows, account.id, anchor.as_of_date, today);
+  // Open-ended above the anchor, deliberately NOT capped at today. A same-day expense books
+  // forward to anchor+1, and capping here would hide what you just logged until tomorrow —
+  // visible in /recap but missing from /balance, which reads as the bot losing your entry.
+  // Nothing legitimately sits in the future beyond that, and drift keeps its own explicit
+  // (prev, next] window, so reconciliation is unaffected.
+  const rowsIn = windowFor(rows, account.id, anchor.as_of_date, '9999-12-31');
 
   // Generated interest and observed interest must never both count for the same day.
   // Fold forward from whichever is later: the anchor, or the last credit actually reported.
@@ -306,9 +311,12 @@ export function balanceOf(
   const after = rowsIn.filter((r) => dayDiff(foldStart, r.occurred_at) > 0);
   const folded = accrue(openingAtFold, foldStart, yesterday, flowsByDate(after), account);
 
-  // accrue() applies flows dated foldStart+1 .. yesterday; today's own rows land after it.
-  const todaysFlows = sum(after.filter((r) => r.occurred_at === today));
-  const confirmed = folded.balance + todaysFlows;
+  // accrue() applies flows dated foldStart+1 .. yesterday, so everything the fold did not
+  // reach has to be added here. That is today's rows AND anything booked forward — a
+  // same-day expense lands on anchor+1, which can be tomorrow. Matching `=== today` would
+  // drop exactly the row you just logged.
+  const beyondFold = sum(after.filter((r) => dayDiff(yesterday, r.occurred_at) > 0));
+  const confirmed = folded.balance + beyondFold;
   const accrued = dailyInterest(confirmed, account); // today's slice, credited tomorrow
 
   return {
@@ -359,7 +367,26 @@ export function bookingDate(
   occurredAt: string,
   latestAnchor: string | null,
 ): { date: string; lateFor: string | null } {
-  if (!latestAnchor || dayDiff(occurredAt, latestAnchor) < 0) return { date: occurredAt, lateFor: null };
+  if (!latestAnchor) return { date: occurredAt, lateFor: null };
+  const behind = dayDiff(occurredAt, latestAnchor); // > 0 means the anchor is later
+
+  // After the anchor: an ordinary flow on its own date.
+  if (behind < 0) return { date: occurredAt, lateFor: null };
+
+  // SAME DAY as the anchor is a real flow, not a reclassification. You read the banking app
+  // once and then go on spending, so a same-day expense almost always happened AFTER the
+  // reading. Treating it as already-in-the-anchor would net it to zero and freeze your
+  // balance for the whole day you snapshotted. It books to the NEXT day because the
+  // reconciliation window is (anchor, next] — exclusive — so a row dated on the anchor day
+  // would fall outside every window and be silently invisible.
+  //
+  // ponytail: wrong only if you snapshot late at night AFTER spending, which double-counts
+  // that day and surfaces as positive drift next month. Compare the snapshot's clock time
+  // if that ever actually bites.
+  if (behind === 0) return { date: addDays(latestAnchor, 1), lateFor: null };
+
+  // Strictly before the anchor: the money left before the reading, so the anchor already
+  // contains it. This is the reclassification case — see lateEntryPair.
   return { date: addDays(latestAnchor, 1), lateFor: occurredAt };
 }
 

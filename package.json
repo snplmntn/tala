@@ -14,7 +14,8 @@
     "typecheck": "tsc --noEmit",
     "format": "prettier --check .",
     "format:write": "prettier --write .",
-    "local": "node --env-file=.env --import tsx src/index.ts"
+    "local": "node --env-file=.env --import tsx src/index.ts",
+    "chat": "node --env-file-if-exists=.env --import tsx scripts/chat.ts"
   },
   "dependencies": {
     "@libsql/client": "^0.15.15"

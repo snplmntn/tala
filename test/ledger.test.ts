@@ -583,3 +583,39 @@ test('the learner survives a boost lapsing and coming back', () => {
   // Against the lapsed live rate instead, the same credit is wrongly rejected.
   assert.equal(learnRate(restored.interest, restored.centavoDays, 0.024, 3).accepted, false);
 });
+
+test('an expense on the snapshot day is a real flow, not a reclassification', () => {
+  // You read the banking app once and then keep spending, so a same-day expense almost
+  // always happened AFTER the reading. Netting it to zero would freeze your balance for
+  // the whole day you snapshotted — and it books to the next day because the window is
+  // (anchor, next] exclusive, so a row dated on the anchor day falls outside every window.
+  const sameDay = bookingDate('2026-09-03', '2026-09-03');
+  assert.equal(sameDay.lateFor, null, 'same day must NOT be treated as already-anchored');
+  assert.equal(sameDay.date, '2026-09-04');
+
+  // Strictly before the anchor is the genuine reclassification case.
+  const before = bookingDate('2026-09-02', '2026-09-03');
+  assert.equal(before.lateFor, '2026-09-02');
+  assert.equal(before.date, '2026-09-04');
+
+  // After the anchor is untouched.
+  const after = bookingDate('2026-09-05', '2026-09-03');
+  assert.equal(after.lateFor, null);
+  assert.equal(after.date, '2026-09-05');
+});
+
+test('a forward-booked same-day expense shows in the balance immediately', () => {
+  // The consequence of the same-day rule: the row is dated anchor+1. If the balance window
+  // stopped at today, you would see the expense in /recap but not in /balance — which reads
+  // as the bot having lost your entry, on the very day you set it up.
+  const anchor = { as_of_date: '2026-09-03', balance_centavos: 1_300_000 };
+  const booked = bookingDate('2026-09-03', anchor.as_of_date);
+  const row = ev({ amount_centavos: -25_000, occurred_at: booked.date, category: 'food' });
+
+  const b = balanceOf(MARIBANK, anchor, [row], '2026-09-03');
+  assert.equal(b.confirmed, 1_300_000 - 25_000, 'the expense must count the moment it is logged');
+
+  // And a row dated ON the anchor is still excluded — the anchor already contains it.
+  const sameDayRow = ev({ amount_centavos: -9_900, occurred_at: '2026-09-03' });
+  assert.equal(balanceOf(MARIBANK, anchor, [sameDayRow], '2026-09-03').confirmed, 1_300_000);
+});

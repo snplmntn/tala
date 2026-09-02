@@ -40,8 +40,15 @@ export type Write = { sql: string; args?: InArgs };
 export class Db {
   private c: Client;
 
-  constructor(url: string, authToken: string) {
-    this.c = createClient({ url, authToken });
+  constructor(url: string, authToken?: string) {
+    // A `file:` URL needs no credential — that is what makes the local chat REPL possible
+    // against the same schema, the same triggers and the same client.
+    this.c = createClient(authToken ? { url, authToken } : { url });
+  }
+
+  /** Load a whole .sql file. Only used to seed a local dev database from schema.sql. */
+  async executeMultiple(sql: string): Promise<void> {
+    await this.c.executeMultiple(sql);
   }
 
   async all<T>(sql: string, args: InArgs = []): Promise<T[]> {
