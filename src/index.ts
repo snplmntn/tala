@@ -289,8 +289,23 @@ function scheduler(): void {
 async function poll(): Promise<never> {
   // The offset comes from the ledger itself: max(telegram_update_id) + 1. No extra table,
   // and a restart resumes exactly where it left off rather than replaying a day.
-  const row = await db.one<{ n: number | null }>('SELECT MAX(telegram_update_id) AS n FROM inbox');
-  let offset = (row?.n ?? 0) + 1;
+  //
+  // Never fatal. This used to be the last unguarded await at boot, so a transient Turso blip
+  // killed the process after the port was already listening — a restart loop that looks like
+  // a broken deploy. Falling back to 0 is safe precisely because inbox.telegram_update_id is
+  // UNIQUE: replayed updates are refused by the idempotency guard, so the worst case is a
+  // few wasted claims, not a duplicate expense.
+  let offset = 1;
+  try {
+    const row = await db.one<{ n: number | null }>('SELECT MAX(telegram_update_id) AS n FROM inbox');
+    offset = (row?.n ?? 0) + 1;
+  } catch (e) {
+    log(
+      'could not read the offset, starting from 0 (UNIQUE guard makes this safe):',
+      String(e).slice(0, 160),
+    );
+    offset = 0;
+  }
   log('polling from offset', offset);
 
   let backoff = 1000;
@@ -340,11 +355,37 @@ if (PAIRING) {
   log('Message the bot; it will reply with your chat id. Set it, then restart.');
 }
 
-// Long-polling and a webhook are mutually exclusive; clear one left by an earlier deploy.
-await deleteWebhook(TOKEN);
-// Populate Telegram's own "/" menu from the command table, so the commands are
-// discoverable in the UI and never drift from /help.
-await setMyCommands(TOKEN, COMMANDS);
+// BIND THE PORT FIRST. Render (and every PaaS) waits for a listener before it will route
+// traffic or call the deploy healthy, so any awaited network call ahead of this can hang the
+// deploy — and an uncaught throw here would kill the process before it ever listened. Two
+// Telegram calls used to sit above this line, which is exactly how a deploy gets stuck on
+// "Build successful" with nothing after it.
 health();
+
+// Now the Telegram setup, and never fatally. If Telegram is slow, rate-limiting or briefly
+// unreachable, the service still comes up healthy and the poll loop retries with backoff on
+// its own. A cosmetic "/" menu is not worth a failed deploy.
+try {
+  // Long-polling and a webhook are mutually exclusive; clear one left by an earlier deploy.
+  await deleteWebhook(TOKEN);
+  // Populate Telegram's own "/" menu from the command table, so the commands are
+  // discoverable in the UI and never drift from /help.
+  await setMyCommands(TOKEN, COMMANDS);
+} catch (e) {
+  log('telegram setup failed, continuing:', String(e).slice(0, 200));
+}
+
 scheduler();
-await poll();
+
+// Last resort. The service is already healthy by this point, so anything escaping the poll
+// loop should be reported and retried rather than taking the process down and handing Render
+// a restart loop to interpret.
+for (;;) {
+  try {
+    await poll();
+  } catch (e) {
+    log('poll loop died, restarting in 10s:', String(e).slice(0, 300));
+    await send(TOKEN, OWNER, `Tala restarted its poll loop: ${String(e).slice(0, 200)}`).catch(() => {});
+    await new Promise((r) => setTimeout(r, 10_000));
+  }
+}
