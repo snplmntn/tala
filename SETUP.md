@@ -79,9 +79,12 @@ turso db tokens create tala     # -> TURSO_TOKEN (a long JWT; shown once)
 
 ## 2. Groq — the extraction key
 
-Groq's free tier is 30 requests/minute and 1,000/day. Tala uses about 45 a day, so you are
-at 4% of it. The model is `qwen/qwen3.8-27b`, which does text _and_ receipt photos with
-strict JSON schema output on the same endpoint.
+Groq's free tier for `qwen/qwen3.8-27b` is 30 requests/minute, 1,000/day, 8,000 tokens/minute
+and **200,000 tokens/day**. The token budget is the one that binds: every call carries the
+system prompt plus the JSON schema, so a message costs ~1.8k tokens however short it is —
+about 110 messages a day, not 1,000. At ~45 a day you are near a third of it, and a
+receipt-photo-heavy month is the one that gets close. The model does text _and_ receipt
+photos with strict JSON schema output on the same endpoint.
 
 Chosen over Gemini's free tier for one reason worth knowing: Gemini's pricing page says
 free-tier content **is** used to improve Google's products, while Groq's Services Agreement
@@ -238,6 +241,8 @@ sent 2k from maya to gotyme, fee 10
 /balance -> confirmed vs expected, per book
 how much do I have -> answers with the balance; no slash command needed
 maya is at 98000 -> PROPOSES an anchor; nothing is written until you tap confirm
+maribank (as a reply to "which account?") -> understood as the ANSWER, not a new message
+hi -> Tala answers in its own words; it only talks when there is nothing to record
 /interest maya 21.48 -> records the credit and learns the rate from it
 /rate -> every rate, and whether it is estimated or observed
 /undo -> voids the last entry

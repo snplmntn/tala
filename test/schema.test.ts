@@ -259,6 +259,7 @@ test('a natural-language anchor writes nothing until confirmed', async () => {
     match_amount: null,
     match_merchant: null,
     looks_like_transfer: false,
+    reply: null,
   };
 
   const proposal = await applyEvent(
@@ -314,6 +315,7 @@ test('a spoken question is answered, not redirected to a slash command', async (
       match_amount: null,
       match_merchant: null,
       looks_like_transfer: false,
+      reply: null,
     },
     { inboxId: 1, today: '2026-09-03', hadPhoto: false },
   );

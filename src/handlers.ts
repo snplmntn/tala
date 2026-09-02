@@ -81,7 +81,13 @@ export async function applyEvent(
       );
     }
     default:
-      return { text: "Didn't catch that. Try: 250 jollibee maribank" };
+      // The extractor writes this one, because it is the only reply with nothing to state:
+      // no amount, no account, no row. Everything else is answered from real numbers below.
+      return {
+        text:
+          e.reply?.trim() ||
+          'Not sure what to do with that. Tell me what you spent — like "250 jollibee maribank" — or /help.',
+      };
   }
 }
 
@@ -175,8 +181,13 @@ async function money(
 async function proposeAnchor(db: Db, accounts: Account[], e: Extracted, today: string): Promise<Reply> {
   const account = acct(accounts, e.account);
   const balance = parseAmount(e.amount);
-  if (!account || balance == null)
+  // Ask only for the half that is actually missing. Re-asking for the part you just said
+  // is what makes a bot feel like a form.
+  if (!account && balance == null)
     return { text: `Which account, and what balance? e.g. "maya is at 98,000" or /snap maya 98000` };
+  if (!account)
+    return { text: `${peso(balance!)} in which account? (${accounts.map((a) => a.id).join(' / ')})` };
+  if (balance == null) return { text: `${account.name} — what balance does the app show?` };
 
   const prev = await db.latestSnapshot(account.id);
   const was = prev ? ` (was ${peso(prev.balance_centavos)} on ${prev.as_of_date})` : '';

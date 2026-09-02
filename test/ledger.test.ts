@@ -77,6 +77,13 @@ test('parseAmount reads what people actually type, and refuses what it cannot re
   assert.equal(parseAmount('2k'), 200_000);
   assert.equal(parseAmount('3.5k'), 350_000);
   assert.equal(parseAmount('-500'), -50_000);
+  // A phone keyboard groups thousands with a space, and the extractor copies it verbatim.
+  assert.equal(parseAmount('32 330'), 3_233_000);
+  assert.equal(parseAmount('1 234 567.89'), 123_456_789);
+  assert.equal(parseAmount('php 250'), 25_000);
+  // But a space is only a separator when the groups are real thousands groups.
+  assert.equal(parseAmount('1 2'), null);
+  assert.equal(parseAmount('32 33'), null);
 
   // Refuse rather than guess: a silently wrong amount is indistinguishable from
   // forgotten spending once it lands in the drift row.

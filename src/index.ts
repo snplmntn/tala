@@ -11,7 +11,7 @@
 
 import { createServer } from 'node:http';
 import { Db } from './db.ts';
-import { extract } from './extract.ts';
+import { extract, transcript } from './extract.ts';
 import { addDays, dayDiff, manilaDate, peso } from './ledger.ts';
 import { COMMANDS, applyEvent, balances, callback, runCommand } from './handlers.ts';
 import {
@@ -68,6 +68,16 @@ const db = new Db(env('TURSO_URL'), env('TURSO_TOKEN'));
 
 const today = () => manilaDate(new Date());
 const log = (...a: unknown[]) => console.log(new Date().toISOString(), ...a);
+
+/**
+ * What was just said, so a follow-up is an answer rather than a fresh sentence.
+ *
+ * One buffer, not one per chat, because the allowlist is one person by construction — see
+ * OWNER above. Slash commands stay out of it: /csv and /balance are pages of output that
+ * would crowd the prompt, and skipping them actually helps, since "maribank" typed after a
+ * detour through /balance still lands next to the question that was really asked.
+ */
+const history = transcript();
 
 // ─────────────────────────────────────────────────────────────────────────────
 // The guard. First thing, before any parse, any LLM call, any write.
@@ -164,6 +174,7 @@ async function handle(u: Update): Promise<void> {
       accounts.map((a) => a.id),
       { text, imageDataUrl },
       today(),
+      history.turns,
     );
     await db.markInbox(inboxId, 'parsed', { model: parsed.model, raw: parsed.raw });
   } catch (e) {
@@ -177,6 +188,7 @@ async function handle(u: Update): Promise<void> {
     return;
   }
 
+  history.add('user', hasPhoto ? `${text} (sent a receipt photo)`.trim() : text);
   for (const ev of parsed.events) {
     const r = await applyEvent(db, accounts, ev, {
       inboxId,
@@ -185,6 +197,7 @@ async function handle(u: Update): Promise<void> {
       hadPhoto: hasPhoto,
     });
     await send(TOKEN, m.chat.id, r.text, r.keyboard);
+    history.add('assistant', r.text);
   }
   await db.markInbox(inboxId, 'applied');
 }

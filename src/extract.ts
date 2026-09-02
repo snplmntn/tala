@@ -48,6 +48,39 @@ export interface Extracted {
   match_amount: string | null;
   match_merchant: string | null;
   looks_like_transfer: boolean;
+  /** Only for intent: unknown — the words to say back. Every other intent is answered by code. */
+  reply: string | null;
+}
+
+/** One side of the conversation, as the model sees it. */
+export interface Turn {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+/**
+ * The last few turns, in memory, per process.
+ *
+ * Without this every message is parsed alone, so "maribank" answering "which account?" is
+ * just the word maribank — and the bot re-asks the question it already asked. That loop is
+ * the difference between a form and something worth talking to.
+ *
+ * Deliberately NOT persisted. One process, one owner, one chat: a restart drops context
+ * that was only useful for the next minute, and the alternative is a column on `inbox` plus
+ * a migration against the live ledger. It moves into the database the day a second instance
+ * or a second user exists — not before.
+ */
+export function transcript(max = 6) {
+  const turns: Turn[] = [];
+  return {
+    turns,
+    add(role: Turn['role'], content: string): void {
+      if (!content.trim()) return;
+      // Capped: a /csv dump or a long balance table would otherwise crowd out the prompt.
+      turns.push({ role, content: content.slice(0, 300) });
+      if (turns.length > max) turns.splice(0, turns.length - max);
+    },
+  };
 }
 
 /**
@@ -89,6 +122,7 @@ function schema(accountIds: string[]) {
             'match_amount',
             'match_merchant',
             'looks_like_transfer',
+            'reply',
           ],
           properties: {
             intent: {
@@ -156,6 +190,11 @@ function schema(accountIds: string[]) {
               description:
                 'true if the wording is sent/moved/transferred/cash-in — even when intent is expense',
             },
+            reply: {
+              ...nullableString,
+              description:
+                'ONLY for intent=unknown: what to say back, in your own words. Null for every other intent.',
+            },
           },
         },
       },
@@ -163,7 +202,7 @@ function schema(accountIds: string[]) {
   };
 }
 
-const SYSTEM = `You convert one Filipino-English message about money into typed events. You are a transcriber, not an accountant.
+const SYSTEM = `You are Tala, a money tracker in a chat. You convert one Filipino-English message about money into typed events. For anything that records money you are a transcriber, not an accountant.
 
 HARD RULES:
 - NEVER compute, convert or sum anything. Copy amounts exactly as written, as strings.
@@ -178,13 +217,24 @@ HARD RULES:
 - But a QUALIFIER about one purchase is NOT a second event. "600 dinner maribank, 400 not mine" is ONE expense of 600 with shared_amount 400. Phrases that mean shared_amount: "N not mine", "N is not mine", "N was theirs", "N is my friend's share", "I paid for N of it". Never emit a separate event for that number.
 - If you cannot tell what the user means, return a single event with intent: unknown.
 
+THE CONVERSATION SO FAR IS CONTEXT, NOT DECORATION:
+- Earlier turns are given to you as real messages. If YOUR last message asked a question, the user's new message is almost certainly the ANSWER to it. Merge it with what was already established and emit the COMPLETE event.
+- "maribank" straight after you asked which account is that account — not a balance query. "32,330" straight after you asked what balance is that balance.
+- Never re-ask something the conversation already answered.
+
+TALKING BACK (intent: unknown only):
+- When nothing is being recorded, asked or corrected — a greeting, a thank-you, small talk, or something you genuinely could not read — return ONE event with intent: unknown and write the answer in "reply", in your own words, as Tala.
+- Be warm and brief: at most two sentences, no lists, no markdown. Say what you can do and give one concrete example of what to type.
+- If you could not understand a message that was clearly ABOUT money, say so plainly rather than guessing, and name what is missing.
+- "reply" must be null for every other intent. Those answers are written by the app, with the real numbers in them.
+
 CHOOSING THE INTENT — this is the part that matters most:
 - Recording a purchase -> expense. Receiving money -> income.
 - Moving money between two of the user's OWN accounts -> transfer, with account = source and to_account = destination. A fee the user mentions goes in the "fee" field, NOT in "category".
 - FIXING SOMETHING ALREADY LOGGED -> correction. Phrases like "the jollibee was 285 not 250", "that was 300", "it was gcash not maya", "wrong amount". Put the OLD amount in match_amount and the merchant in match_merchant so the row can be found, and the NEW amount in amount. Never return an expense for a correction — that would record the purchase twice.
 - ASKING A QUESTION, recording nothing -> query, with query_kind set. "how much do I have" / "what's my balance" -> balance. "recap" / "how much did I spend" -> recap. "who owes me" -> owed. "export" -> csv.
 - REPORTING A BALANCE they just read in their banking app -> snapshot, with account and amount. "maya is at 98000", "maribank shows 12,850", "my gcash balance is 340". This is NOT income and NOT an expense: it is a statement of what an account currently holds.
-- Use unknown ONLY when nothing above fits. Do not fall back to unknown for a question or a balance report.
+- Use unknown when nothing above fits, and then always write "reply". Do not fall back to unknown for a question or a balance report.
 
 RECEIPT IMAGES: read merchant, date and the TOTAL. Do not try to read every line item. A receipt never says which card was used, so account must be null.`;
 
@@ -203,6 +253,7 @@ export async function extract(
   accountIds: string[],
   input: { text?: string | null; imageDataUrl?: string | null },
   today: string,
+  history: Turn[] = [],
 ): Promise<ExtractResult> {
   const content: unknown[] = [];
   if (input.imageDataUrl) content.push({ type: 'image_url', image_url: { url: input.imageDataUrl } });
@@ -216,6 +267,10 @@ export async function extract(
         role: 'system',
         content: `${SYSTEM}\n\nAccounts: ${accountIds.join(', ')}\nToday in Manila: ${today}`,
       },
+      // Prior turns as real messages rather than a block pasted into the system prompt:
+      // the roles are what tell the model which question was ITS question. Constrained
+      // decoding still forces the response shape, so plain-text assistant turns are safe.
+      ...history,
       { role: 'user', content },
     ],
     response_format: {

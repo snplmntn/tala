@@ -20,9 +20,15 @@ export function parseAmount(raw: string | null | undefined): number | null {
   let s = String(raw)
     .trim()
     .toLowerCase()
-    .replace(/[₱p]|php|pesos?/g, '')
+    // `php` before the bare `p`, or the alternation eats the leading p and leaves "hp".
+    .replace(/php|pesos?|[₱p]/g, '')
     .replace(/,/g, '')
     .trim();
+
+  // "32 330" is how a phone keyboard types 32,330, and the extractor copies it verbatim
+  // because it is forbidden from reformatting. Collapse the spaces only when the groups
+  // really ARE thousands groups, so "1 2" stays unreadable instead of quietly becoming 12.
+  if (/^-?\d{1,3}(?: \d{3})+(?:\.\d{1,2})?$/.test(s)) s = s.replace(/ /g, '');
 
   let mult = 1;
   const k = s.match(/^(-?\d+(?:\.\d+)?)\s*k$/);

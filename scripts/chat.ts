@@ -20,7 +20,7 @@ import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { stdin, stdout } from 'node:process';
 
 import { Db } from '../src/db.ts';
-import { extract } from '../src/extract.ts';
+import { extract, transcript } from '../src/extract.ts';
 import { manilaDate } from '../src/ledger.ts';
 import { HELP, applyEvent, callback, runCommand } from '../src/handlers.ts';
 
@@ -62,6 +62,8 @@ if (remote) {
 }
 
 const today = () => manilaDate(new Date());
+// The same rolling context the bot keeps, so a follow-up answer behaves identically here.
+const history = transcript();
 
 console.log(`
 Tala — local chat  (${remote ? 'REMOTE' : DEV_FILE})   ${today()}
@@ -85,6 +87,10 @@ Meta:     :raw <json>   apply a hand-written event, skipping the LLM
 // stdin is a pipe rather than a TTY, which would make this untestable non-interactively.
 const rl = createInterface({ input: stdin, output: stdout, prompt: '\u203a ' });
 let inboxSeq = Date.now(); // stands in for telegram_update_id
+// Tracked rather than read off the interface: `closed` exists at runtime but not in
+// @types/node's promises Interface, and a cast would be a lie about why we know.
+let closed = false;
+rl.on('close', () => (closed = true));
 
 async function handle(line: string): Promise<void> {
   const t = today();
@@ -157,6 +163,7 @@ async function handle(line: string): Promise<void> {
       accounts.map((a) => a.id),
       { text: line },
       t,
+      history.turns,
     );
     await db.markInbox(inboxId, 'parsed', { model: parsed.model, raw: parsed.raw });
   } catch (e) {
@@ -164,9 +171,11 @@ async function handle(line: string): Promise<void> {
     return console.log(`extraction failed (kept in inbox, nothing lost): ${String(e).slice(0, 160)}`);
   }
 
+  history.add('user', line);
   for (const ev of parsed.events) {
     const r = await applyEvent(db, accounts, ev, { inboxId, today: t, hadPhoto: false });
     console.log(r.text);
+    history.add('assistant', r.text);
     if (r.keyboard)
       console.log(
         '  buttons:',
@@ -191,6 +200,9 @@ for await (const raw of rl) {
     }
     console.log();
   }
-  rl.prompt();
+  // Piped stdin hits EOF while the last handle() is still awaiting Groq, so readline is
+  // already closed by the time we get here — prompting it then throws ERR_USE_AFTER_CLOSE
+  // and kills the run, which is exactly the non-interactive case this loop exists to support.
+  if (!closed) rl.prompt();
 }
 rl.close();
