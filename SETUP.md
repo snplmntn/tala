@@ -175,7 +175,7 @@ to undo. One value you set once has no race at all.
 Do this before Render. A local restart is one second; a Render redeploy is two minutes.
 
 ```bash
-npm test          # must be 45/45 before you trust any number it shows you
+npm test          # must be 47/47 before you trust any number it shows you
 npm run typecheck
 ```
 
@@ -505,4 +505,4 @@ pot credited.
 | `1 broken transfer` in `/balance`                     | One leg of a transfer is missing. Find it: `turso db shell tala "SELECT transfer_id, COUNT(*), SUM(amount_centavos) FROM events WHERE transfer_id IS NOT NULL GROUP BY transfer_id HAVING COUNT(*) != 2 OR SUM(amount_centavos) != 0"` |
 | "that period is already reconciled"                   | You tried to void a row an anchor already covers. Correct it instead — voiding it would change a balance that was already reconciled.                                                                                                  |
 | A correction hit the wrong row                        | `/undo` reverses the last entry, then correct again naming the old amount _and_ the merchant.                                                                                                                                          |
-| Adding a seventh account                              | One INSERT, no redeploy — the LLM's account enum is read from the table at request time: `turso db shell tala "INSERT INTO accounts (id,name,book,kind,sort) VALUES ('seabank','SeaBank','personal','bank',7)"`                        |
+| Adding a seventh account                              | `/account add seabank personal bank SeaBank`, then `/rate seabank 4% gross`. No SQL and no redeploy — the extractor's account enum is read from the table at request time.                                                             |

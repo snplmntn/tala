@@ -113,6 +113,28 @@ export class Db {
     return (await this.accounts()).map((a) => a.id);
   }
 
+  /** Including inactive ones — closed accounts keep their history and their rows. */
+  allAccounts(): Promise<Account[]> {
+    return this.all<Account>('SELECT * FROM accounts ORDER BY active DESC, sort');
+  }
+
+  addAccount(a: { id: string; name: string; book: string; kind: string }): Write {
+    return {
+      sql: `INSERT INTO accounts (id, name, book, kind, sort)
+            VALUES (?, ?, ?, ?, (SELECT COALESCE(MAX(sort), 0) + 1 FROM accounts))`,
+      args: [a.id, a.name, a.book, a.kind],
+    };
+  }
+
+  /**
+   * Deactivate, never delete. Events reference accounts, so a DELETE would either fail on
+   * the foreign key or orphan history. `active = 0` drops it from the LLM's enum and from
+   * the snapshot prompt while every past row keeps resolving.
+   */
+  setAccountActive(id: string, active: boolean): Write {
+    return { sql: 'UPDATE accounts SET active = ? WHERE id = ?', args: [active ? 1 : 0, id] };
+  }
+
   // ── inbox ─────────────────────────────────────────────────────────────────
 
   /**

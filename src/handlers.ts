@@ -691,6 +691,7 @@ export const COMMANDS = [
   { name: 'interest', args: '<account> <amount>', help: 'report a credit; the rate learns from it' },
   { name: 'rate', args: '[account] [10% gross]', help: 'see rates, or set one' },
   { name: 'owed', args: '', help: 'money you fronted that has not come back' },
+  { name: 'account', args: '[add|off|on] …', help: 'list accounts, or open and close them' },
   { name: 'undo', args: '', help: 'void the last entry' },
   { name: 'csv', args: '', help: 'the whole ledger as a spreadsheet' },
   { name: 'help', args: '', help: 'this' },
@@ -743,6 +744,9 @@ export async function runCommand(
     case 'rate':
     case 'rates':
       return rates(db, accounts, arg);
+    case 'account':
+    case 'accounts':
+      return accountsCmd(db, arg);
     case 'owed': {
       const owed = unsettled(await db.allEvents());
       return { text: owed > 0 ? `owed to you: ${peso(owed)}` : 'nothing outstanding' };
@@ -754,4 +758,85 @@ export async function runCommand(
     default:
       return { text: `Unknown command /${cmd}. Try /help` };
   }
+}
+
+const BOOKS = ['personal', 'business'] as const;
+const KINDS = ['bank', 'ewallet', 'cash', 'credit'] as const;
+
+/**
+ * `/account` to list, `/account add …` to open one, `/account off …` to close one.
+ *
+ * This exists because the design assumes you will open accounts — the whole point of
+ * tracking rates is chasing them, and PH digital banks re-tier constantly. Without a chat
+ * path, opening SeaBank would block you from logging SeaBank expenses until you reached a
+ * terminal, because the account list IS the closed enum handed to the extractor.
+ *
+ * Deliberately does NOT take a rate. Setting one needs the gross-or-net word, `/rate`
+ * already enforces that, and duplicating rate parsing here is how the two drift apart.
+ */
+export async function accountsCmd(db: Db, arg: string): Promise<Reply> {
+  const parts = arg.trim().split(/\s+/).filter(Boolean);
+  const [verb, id, ...rest] = parts;
+
+  if (!verb) {
+    const rows = await db.allAccounts();
+    const lines = rows.map((a) => {
+      const rate = a.rate > 0 ? `${(a.rate * 100).toFixed(2)}% net` : 'untracked';
+      return `  ${a.id.padEnd(9)} ${a.book.padEnd(9)} ${a.kind.padEnd(8)} ${rate}${a.active ? '' : '   (closed)'}`;
+    });
+    return {
+      text: [
+        'Accounts — this list is the closed set the extractor may choose from.',
+        ...lines,
+        '',
+        `/account add <id> <${BOOKS.join('|')}> <${KINDS.join('|')}> [display name]`,
+        '/account off <id>     close it (history stays, extractor stops offering it)',
+        '/account on <id>      reopen it',
+        '',
+        'Set a rate separately, so the gross-or-net word is never skipped:',
+        '  /rate <id> 4% gross',
+      ].join('\n'),
+    };
+  }
+
+  if (verb === 'off' || verb === 'on') {
+    if (!id) return { text: `Which account? /account ${verb} <id>` };
+    const existing = (await db.allAccounts()).find((a) => a.id === id.toLowerCase());
+    if (!existing) return { text: `No account "${id}".` };
+    await db.batch([db.setAccountActive(existing.id, verb === 'on')]);
+    return {
+      text: `${existing.name} ${verb === 'on' ? 'reopened' : 'closed — history kept, no longer offered'}`,
+    };
+  }
+
+  if (verb !== 'add') return { text: `Unknown: /account ${verb}. Try /account on its own.` };
+
+  const [book, kind, ...nameParts] = rest;
+  if (!id || !book || !kind)
+    return { text: `/account add <id> <${BOOKS.join('|')}> <${KINDS.join('|')}> [display name]` };
+
+  // The id goes into the LLM's enum and into every future row, so it is validated rather
+  // than sanitised — a silently mangled id is an account you cannot spend from.
+  const cleanId = id.toLowerCase();
+  if (!/^[a-z][a-z0-9]{1,15}$/.test(cleanId))
+    return { text: `"${id}" won't work as an id — lowercase letters and digits, 2-16 chars, e.g. seabank.` };
+  if (!BOOKS.includes(book as never)) return { text: `Book must be one of: ${BOOKS.join(', ')}` };
+  if (!KINDS.includes(kind as never)) return { text: `Kind must be one of: ${KINDS.join(', ')}` };
+
+  const all = await db.allAccounts();
+  if (all.some((a) => a.id === cleanId))
+    return { text: `"${cleanId}" already exists. /account on ${cleanId} to reopen.` };
+
+  const name = nameParts.join(' ') || cleanId[0].toUpperCase() + cleanId.slice(1);
+  await db.batch([db.addAccount({ id: cleanId, name, book, kind })]);
+
+  const lines = [`${name} added · ${book} · ${kind} · untracked`];
+  if (kind === 'credit') {
+    // The sign convention, stated at the one moment it matters. Liabilities carry negative
+    // balances so net worth stays SUM(balance) regardless of kind.
+    lines.push('A credit account carries a NEGATIVE balance — spending on it increases what you owe.');
+  }
+  lines.push(`Anchor it: /snap ${cleanId} <amount>`);
+  lines.push(`Earns interest? /rate ${cleanId} 4% gross`);
+  return { text: lines.join('\n') };
 }

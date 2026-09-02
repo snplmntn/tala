@@ -189,3 +189,47 @@ test('a large peso balance survives a round trip exactly', async () => {
   assert.equal(row.balance_centavos, big);
   assert.equal(typeof row.balance_centavos, 'number', 'must arrive as a number, never a string');
 });
+
+// ── adding an account: one INSERT, and the extractor's enum follows ─────────
+
+test('a new account joins the extractor enum with no redeploy', async () => {
+  // This is the whole reason accounts are rows rather than a TypeScript union: the closed
+  // set handed to the LLM is read from the table at request time, so opening SeaBank is one
+  // INSERT and you can log SeaBank expenses immediately.
+  const db = await fresh();
+  assert.equal((await db.accountIds()).includes('seabank'), false);
+
+  await db.batch([db.addAccount({ id: 'seabank', name: 'SeaBank', book: 'personal', kind: 'bank' })]);
+  assert.equal((await db.accountIds()).includes('seabank'), true);
+
+  // Untracked by default: a rate has to be set deliberately, with its gross-or-net basis.
+  const [row] = await db.all<{ rate: number; rate_source: string; active: number }>(
+    "SELECT rate, rate_source, active FROM accounts WHERE id = 'seabank'",
+  );
+  assert.equal(row.rate, 0);
+  assert.equal(row.active, 1);
+});
+
+test('closing an account hides it from the enum but keeps its history', async () => {
+  // Never a DELETE: events reference accounts, so deleting would either fail on the foreign
+  // key or orphan rows. Closing has to preserve every past figure.
+  const db = await fresh();
+  await db.run(
+    `INSERT INTO events (type, book, account_id, amount_centavos, occurred_at, logged_at)
+     VALUES ('expense','personal','gcash',-5000,'2026-09-03','2026-09-03T00:00:00Z')`,
+  );
+
+  await db.batch([db.setAccountActive('gcash', false)]);
+  assert.equal((await db.accountIds()).includes('gcash'), false, 'no longer offered to the extractor');
+  assert.equal(
+    (await db.allAccounts()).some((a) => a.id === 'gcash'),
+    true,
+    'still listed for the owner',
+  );
+
+  const [kept] = await db.all<{ n: number }>("SELECT COUNT(*) AS n FROM events WHERE account_id = 'gcash'");
+  assert.equal(kept.n, 1, 'history survives a closed account');
+
+  await db.batch([db.setAccountActive('gcash', true)]);
+  assert.equal((await db.accountIds()).includes('gcash'), true, 'and it can be reopened');
+});

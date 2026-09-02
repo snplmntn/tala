@@ -93,7 +93,19 @@ credit replaces the seed permanently:
 /rate maya 10% gross     -> set one by hand (the basis word is required)
 ```
 
-Rates live in `accounts` rows, never in code — nothing here is a constant. The learner needs
+Accounts live in rows too, so opening one is a chat command rather than a deploy — the
+closed set handed to the extractor is `SELECT id FROM accounts WHERE active`, read at
+request time:
+
+```
+/account                                    list them, closed ones included
+/account add seabank personal bank SeaBank  opens it, untracked
+/rate seabank 4% gross                      then set the rate, basis word required
+/account off gcash                          closes it; history stays, enum drops it
+```
+
+Closing is never a delete: events reference accounts, so a delete would fail on the foreign
+key or orphan history. Rates live in `accounts` rows, never in code — nothing here is a constant. The learner needs
 two observations and refuses a result outside `[0, 2 × rate_seed]`, keeping the good seed
 and saying why rather than writing an authoritative wrong number. `rate_seed` is the stable
 band and the learner never rewrites it: guarding against the live rate would be a one-way
@@ -201,7 +213,7 @@ the social-engineering attacks that _do_ move money on PH e-wallets.
 ## Verify
 
 ```bash
-npm test         # 45 asserts across 2 files, node --test, no framework
+npm test         # 47 asserts across 2 files, node --test, no framework
 npm run typecheck
 npm run format
 npm run chat     # talk to a local SQLite copy — no Telegram, no bot token, no deploy
