@@ -21,6 +21,11 @@ bot  personal
        expected        ₱85,000.00
 ```
 
+**[GUIDE.md](GUIDE.md)** — how to actually live with it: what to type, what the answers mean,
+and the one habit that makes the numbers true.
+**[SETUP.md](SETUP.md)** — one sitting, about 40 minutes, every service a free tier.
+Below is why it is built this way.
+
 ## The one thing to understand
 
 Everything here reduces to a single identity:
