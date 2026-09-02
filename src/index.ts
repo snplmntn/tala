@@ -184,8 +184,7 @@ async function handle(u: Update): Promise<void> {
       GROQ,
       accounts.map((a) => a.id),
       { text, imageDataUrl },
-      today(),
-      history.turns,
+      { today: today(), history: history.turns, owner: await db.getSetting('owner_name') },
     );
     await db.markInbox(inboxId, 'parsed', { model: parsed.model, raw: parsed.raw });
   } catch (e) {
@@ -229,6 +228,7 @@ async function handle(u: Update): Promise<void> {
 async function dailyLine(): Promise<void> {
   const accounts = await db.accounts();
   const t = today();
+  const name = await db.getSetting('owner_name');
   const body = await balances(db, accounts, t);
 
   const ages = await Promise.all(
@@ -239,7 +239,7 @@ async function dailyLine(): Promise<void> {
   );
   const stalest = Math.max(...ages);
   const nudge = stalest >= 28 ? `\n\nAnchors are ${stalest}d old — time to /snap.` : '';
-  await send(TOKEN, OWNER, `${t}\n${body}${nudge}`);
+  await send(TOKEN, OWNER, `${name ? `${name} — ` : ''}${t}\n${body}${nudge}`);
 }
 
 /**
@@ -263,7 +263,7 @@ async function retryDeferred(): Promise<void> {
         GROQ,
         accounts.map((a) => a.id),
         { text: row.raw_text },
-        today(),
+        { today: today(), owner: await db.getSetting('owner_name') },
       );
       await db.markInbox(row.id, 'parsed', { model: parsed.model, raw: parsed.raw });
       for (const ev of parsed.events) {

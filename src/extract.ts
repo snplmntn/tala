@@ -77,7 +77,9 @@ export function transcript(max = 6) {
     add(role: Turn['role'], content: string): void {
       if (!content.trim()) return;
       // Capped: a /csv dump or a long balance table would otherwise crowd out the prompt.
-      turns.push({ role, content: content.slice(0, 300) });
+      // Control characters go too — the transport marks its monospace blocks with them, and
+      // they are markup, not something the model should ever read back as content.
+      turns.push({ role, content: content.replace(/[\u0000-\u0008]/g, '').slice(0, 300) });
       if (turns.length > max) turns.splice(0, turns.length - max);
     },
   };
@@ -227,6 +229,7 @@ TALKING BACK (intent: unknown only):
 - Be warm and brief: at most two sentences, no lists, no markdown. Say what you can do and give one concrete example of what to type.
 - If you could not understand a message that was clearly ABOUT money, say so plainly rather than guessing, and name what is missing.
 - "reply" must be null for every other intent. Those answers are written by the app, with the real numbers in them.
+- If the conversation shows Tala just asked what to call the user and they answered with a bare name, your reply must tell them to run "/name <that name>" so it is remembered. You cannot save it yourself.
 
 CHOOSING THE INTENT — this is the part that matters most:
 - Recording a purchase -> expense. Receiving money -> income.
@@ -252,8 +255,7 @@ export async function extract(
   apiKey: string,
   accountIds: string[],
   input: { text?: string | null; imageDataUrl?: string | null },
-  today: string,
-  history: Turn[] = [],
+  ctx: { today: string; history?: Turn[]; owner?: string | null },
 ): Promise<ExtractResult> {
   const content: unknown[] = [];
   if (input.imageDataUrl) content.push({ type: 'image_url', image_url: { url: input.imageDataUrl } });
@@ -265,12 +267,21 @@ export async function extract(
     messages: [
       {
         role: 'system',
-        content: `${SYSTEM}\n\nAccounts: ${accountIds.join(', ')}\nToday in Manila: ${today}`,
+        content: [
+          SYSTEM,
+          '',
+          `Accounts: ${accountIds.join(', ')}`,
+          `Today in Manila: ${ctx.today}`,
+          // Only when it is known. Told to guess a name, a model will happily invent one.
+          ctx.owner ? `You are talking to ${ctx.owner}. Use their name naturally, not in every line.` : '',
+        ]
+          .join('\n')
+          .trim(),
       },
       // Prior turns as real messages rather than a block pasted into the system prompt:
       // the roles are what tell the model which question was ITS question. Constrained
       // decoding still forces the response shape, so plain-text assistant turns are safe.
-      ...history,
+      ...(ctx.history ?? []),
       { role: 'user', content },
     ],
     response_format: {

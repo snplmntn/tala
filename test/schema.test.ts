@@ -17,7 +17,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 import { Db } from '../src/db.ts';
-import { anchorAccount, applyEvent, balances, callback } from '../src/handlers.ts';
+import { anchorAccount, applyEvent, balances, callback, runCommand } from '../src/handlers.ts';
 
 const SCHEMA = readFileSync(new URL('../schema.sql', import.meta.url), 'utf8');
 
@@ -296,6 +296,14 @@ test('a spoken question is answered, not redirected to a slash command', async (
   // /balance" is friction with no correctness argument behind it — a query is read-only.
   const db = await fresh();
   const accounts = await db.accounts();
+  // Anchored first: an un-anchored ledger answers every balance question with the first-run
+  // walkthrough instead, which is a different behaviour with its own test below.
+  await anchorAccount(
+    db,
+    accounts.find((a) => a.id === 'maya')!,
+    9_800_000,
+    '2026-09-03',
+  );
   const reply = await applyEvent(
     db,
     accounts,
@@ -321,6 +329,35 @@ test('a spoken question is answered, not redirected to a slash command', async (
   );
   assert.match(reply.text, /Maya Savings/, 'it should answer with the balance itself');
   assert.doesNotMatch(reply.text, /Ask with/, 'not a pointer to a command');
+});
+
+test('a ledger with no anchors is walked through setup, not shown a table of zeros', async () => {
+  // Before the first anchor every number in the app is zero and the balance table is a list
+  // of things that have not happened yet — which is what the screenshots showed, and what
+  // left a new user typing /snap for each account with nothing telling them to.
+  const db = await fresh();
+  const accounts = await db.accounts();
+
+  const cold = await runCommand(db, accounts, '/balance', '2026-09-03');
+  assert.match(cold!.text, /ANCHOR/, 'it must say what an anchor is');
+  assert.match(cold!.text, /what should I call you/i, 'and ask for a name while nothing is set');
+
+  await db.setSetting('owner_name', 'Sean');
+  assert.match((await runCommand(db, accounts, '/balance', '2026-09-03'))!.text, /Hi Sean/);
+  assert.doesNotMatch(
+    (await runCommand(db, accounts, '/balance', '2026-09-03'))!.text,
+    /what should I call you/i,
+    'it must stop asking once it knows',
+  );
+
+  // One anchor is the whole difference: from here it is a real ledger and answers like one.
+  await anchorAccount(
+    db,
+    accounts.find((a) => a.id === 'maya')!,
+    9_800_000,
+    '2026-09-03',
+  );
+  assert.match((await runCommand(db, accounts, '/balance', '2026-09-03'))!.text, /Maya Savings/);
 });
 
 // ── the first anchor, when spending was already logged ──────────────────────

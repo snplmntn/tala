@@ -23,6 +23,7 @@ import { Db } from '../src/db.ts';
 import { extract, transcript } from '../src/extract.ts';
 import { manilaDate } from '../src/ledger.ts';
 import { HELP, applyEvent, callback, runCommand } from '../src/handlers.ts';
+import { plain } from '../src/telegram.ts';
 
 const args = new Set(process.argv.slice(2));
 const remote = args.has('--remote');
@@ -100,7 +101,7 @@ async function handle(line: string): Promise<void> {
   // the other — which is exactly how /help ended up missing here.
   const reply = await runCommand(db, accounts, line, t);
   if (reply) {
-    console.log(reply.document ? reply.document.content : reply.text);
+    console.log(reply.document ? reply.document.content : plain(reply.text));
     if (reply.keyboard)
       console.log(
         '  buttons:',
@@ -120,7 +121,7 @@ async function handle(line: string): Promise<void> {
   }
   if (line.startsWith(':tap ')) {
     const r = await callback(db, line.slice(5).trim(), t);
-    console.log(r.text);
+    console.log(plain(r.text));
     if (r.keyboard)
       console.log(
         '  buttons:',
@@ -143,7 +144,7 @@ async function handle(line: string): Promise<void> {
       today: t,
       hadPhoto: false,
     });
-    console.log(r.text);
+    console.log(plain(r.text));
     if (r.keyboard)
       console.log(
         '  buttons:',
@@ -171,8 +172,7 @@ async function handle(line: string): Promise<void> {
       groq,
       accounts.map((a) => a.id),
       { text: line },
-      t,
-      history.turns,
+      { today: t, history: history.turns, owner: await db.getSetting('owner_name') },
     );
     await db.markInbox(inboxId, 'parsed', { model: parsed.model, raw: parsed.raw });
   } catch (e) {
@@ -183,7 +183,7 @@ async function handle(line: string): Promise<void> {
   history.add('user', line);
   for (const ev of parsed.events) {
     const r = await applyEvent(db, accounts, ev, { inboxId, today: t, hadPhoto: false });
-    console.log(r.text);
+    console.log(plain(r.text));
     history.add('assistant', r.text);
     if (r.keyboard)
       console.log(

@@ -4,11 +4,39 @@
  * Two rules encoded here rather than left to discipline:
  *  - The bot token is embedded in every api.telegram.org file URL, so that URL NEVER
  *    leaves this file. Images are downloaded here and handed onward as a data URL.
- *  - parse_mode is never set. OCR'd merchant strings are attacker-influencable, and
- *    omitting the mode is less code than escaping it correctly.
+ *  - parse_mode is HTML, and EVERY outgoing string is escaped here, with no exceptions and
+ *    no caller opting out. Merchant names come from OCR and from a model, so they are
+ *    attacker-influencable; the earlier rule was to set no parse_mode at all, priced against
+ *    MarkdownV2's eighteen special characters. This is three, at a single choke point, and
+ *    it buys the one thing plain text cannot give: a monospace block, so the balance columns
+ *    actually line up on a phone. The only tags that ever exist are the ones mono() marks.
  */
 
 const API = 'https://api.telegram.org/bot';
+
+/**
+ * Columns only align in a monospace font, and Telegram renders plain text proportionally —
+ * so every padEnd() in a table was padding for an alignment that never happened.
+ *
+ * Marked with control characters rather than with `<pre>` directly, because the escape below
+ * runs over the WHOLE assembled message. Escape first, then turn the markers into tags: no
+ * ordering to get wrong, and no path by which merchant text can become markup. Only the
+ * table is wrapped, so /commands outside it stay tappable — inside a code block they are not.
+ */
+const OPEN = '\u0001';
+const CLOSE = '\u0002';
+export const mono = (block: string): string => `${OPEN}${block}${CLOSE}`;
+
+/** The same text for somewhere that has no markup at all — the terminal REPL. */
+export const plain = (text: string): string => text.replaceAll(OPEN, '').replaceAll(CLOSE, '');
+
+const html = (text: string): string =>
+  text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replaceAll(OPEN, '<pre>')
+    .replaceAll(CLOSE, '</pre>');
 
 export interface Update {
   update_id: number;
@@ -50,12 +78,21 @@ async function call(token: string, method: string, payload: unknown): Promise<un
 }
 
 export async function send(token: string, chatId: number, text: string, keyboard?: Keyboard) {
-  return call(token, 'sendMessage', {
+  const markup = keyboard ? { reply_markup: { inline_keyboard: keyboard } } : {};
+  const res = (await call(token, 'sendMessage', {
     chat_id: chatId,
-    text,
-    // No parse_mode. See the file header.
-    ...(keyboard ? { reply_markup: { inline_keyboard: keyboard } } : {}),
-  });
+    text: html(text),
+    parse_mode: 'HTML',
+    ...markup,
+  })) as { ok?: boolean };
+
+  // Fail SOFT, always. Telegram rejects a malformed entity with a 400 and sends nothing, so
+  // any formatting bug would cost you the reply itself — an expense you watched vanish. The
+  // unformatted text is worth more than the alignment, so it goes out either way.
+  if (res?.ok === false) {
+    return call(token, 'sendMessage', { chat_id: chatId, text, ...markup });
+  }
+  return res;
 }
 
 /**

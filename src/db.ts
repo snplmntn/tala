@@ -66,6 +66,54 @@ export class Db {
     this.c = createClient(authToken ? { url, authToken } : { url });
   }
 
+  /**
+   * Preferences that are not ledger facts — what to call you, and whatever comes next.
+   *
+   * The DDL lives here rather than in schema.sql because schema.sql has no IF NOT EXISTS
+   * and is only ever run once, against an empty database. A ledger deployed before this
+   * table existed would never get it. One idempotent statement at boot upgrades every
+   * install for free, with no migration to remember and nothing to run by hand.
+   *
+   * Mutable on purpose: the append-only triggers guard `events`, where rewriting history
+   * would be a lie about money. A nickname is not history.
+   */
+  private settingsReady?: Promise<number>;
+
+  /** Created on first use, not at boot: no ordering to get wrong, and the tests get it free. */
+  private ensureSettings(): Promise<number> {
+    return (this.settingsReady ??= this.run(
+      `CREATE TABLE IF NOT EXISTS settings (
+         key        TEXT PRIMARY KEY,
+         value      TEXT NOT NULL,
+         updated_at TEXT NOT NULL
+       )`,
+    ));
+  }
+
+  /**
+   * Reading a preference must never be able to break a message. Every failure here means
+   * the same thing to every caller — "no preference set" — and the ledger does not care.
+   */
+  async getSetting(key: string): Promise<string | null> {
+    try {
+      await this.ensureSettings();
+      const r = await this.one<{ value: string }>('SELECT value FROM settings WHERE key = ?', [key]);
+      return r?.value ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Unlike the read, this throws: silently not saving what you just typed is worse. */
+  async setSetting(key: string, value: string): Promise<void> {
+    await this.ensureSettings();
+    await this.run(
+      `INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      [key, value, new Date().toISOString()],
+    );
+  }
+
   /** Load a whole .sql file. Only used to seed a local dev database from schema.sql. */
   async executeMultiple(sql: string): Promise<void> {
     await this.c.executeMultiple(sql);

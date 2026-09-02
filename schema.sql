@@ -8,6 +8,12 @@
 -- 52-bit float precision, so a REAL peso column drifts — and the drift would land in the
 -- reconciliation adjustment, where it reads as unlogged spending.
 
+-- NOTE: there is one more table, `settings`, and it is deliberately NOT here.
+-- It holds preferences rather than ledger facts (what to call you, for now) and is created
+-- by Db.initSettings() at boot with IF NOT EXISTS. This file has no IF NOT EXISTS and only
+-- ever runs against an empty database, so a table added here would never reach a ledger
+-- that was already deployed. Defined once, in src/db.ts.
+
 ------------------------------------------------------------------------------
 -- accounts: rows, not an enum in three places.
 -- The closed enum handed to the LLM is `SELECT id FROM accounts WHERE active`,

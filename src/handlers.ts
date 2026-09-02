@@ -33,7 +33,7 @@ import {
   windowFor,
   type Event,
 } from './ledger.ts';
-import type { Keyboard } from './telegram.ts';
+import { mono, type Keyboard } from './telegram.ts';
 
 export interface Reply {
   text: string;
@@ -502,7 +502,13 @@ export async function balances(db: Db, accounts: Account[], today: string): Prom
       );
     }
 
-    out.push(`${book}`, ...lines, `  ${'expected'.padEnd(13)} ${peso(confirmed + accrued).padStart(12)}`);
+    // The table goes in a monospace block so the columns land; the hint below it does not,
+    // because a /command inside a code block stops being tappable.
+    out.push(
+      mono(
+        [book, ...lines, `  ${'expected'.padEnd(13)} ${peso(confirmed + accrued).padStart(12)}`].join('\n'),
+      ),
+    );
     if (unanchored.length) {
       // Say what the total is missing, in the same breath as the total.
       out.push(
@@ -551,7 +557,7 @@ export async function recap(db: Db, accounts: Account[], month: string): Promise
   }
   const owed = unsettled(rows);
   if (owed > 0) out.push('', `owed to you: ${peso(owed)}`);
-  return out.join('\n');
+  return mono(out.join('\n'));
 }
 
 /** The laziest possible answer to every future "can it show me X?". */
@@ -707,8 +713,7 @@ export async function rates(db: Db, accounts: Account[], arg: string): Promise<R
     return {
       text: [
         'Rates are stored NET — what actually lands in the account.',
-        ...lines,
-        '',
+        mono(lines.join('\n')),
         'Set one:  /rate maya 10% gross   (or "8% net")',
         'Report a real credit and it learns instead:  /interest maya 21.48',
       ].join('\n'),
@@ -852,26 +857,56 @@ export const COMMANDS = [
   { name: 'rate', args: '[account] [10% gross]', help: 'see rates, or set one' },
   { name: 'owed', args: '', help: 'money you fronted that has not come back' },
   { name: 'account', args: '[add|off|on] …', help: 'list accounts, or open and close them' },
+  { name: 'name', args: '[what to call you]', help: 'what Tala calls you' },
   { name: 'undo', args: '', help: 'void the last entry' },
   { name: 'csv', args: '', help: 'the whole ledger as a spreadsheet' },
   { name: 'help', args: '', help: 'this' },
 ] as const;
 
 export const HELP = [
-  'Tala — say what you spent.',
+  'Tala — just say what you spent.',
+  mono(
+    [
+      '250 jollibee maribank',
+      'jeep 15, load 50, lunch 90 gcash',
+      '600 dinner maribank, 400 not mine',
+      'sent 2k from maya to gotyme, fee 10',
+      'the jollibee was 285 not 250',
+      '(or send a receipt photo)',
+    ].join('\n'),
+  ),
+  // One per line, NOT padded into columns: a /command inside a monospace block stops being
+  // tappable, and tapping beats alignment on a list you read once.
+  ...COMMANDS.map((c) => `/${c.name}${c.args ? ' ' + c.args : ''} — ${c.help}`),
   '',
-  '  250 jollibee maribank',
-  '  jeep 15, load 50, lunch 90 gcash',
-  '  600 dinner maribank, 400 not mine',
-  '  sent 2k from maya to gotyme, fee 10',
-  '  the jollibee was 285 not 250',
-  '  (or send a receipt photo)',
-  '',
-  ...COMMANDS.map((c) => `/${c.name}${c.args ? ' ' + c.args : ''}`.padEnd(34) + c.help),
+  'An ANCHOR is a real balance you read off your banking app. Everything is counted forward',
+  'from it, so /snap is the one habit worth keeping — the rest is just telling me things.',
   '',
   'Balances show confirmed (what the bank credited) and expected (plus today’s',
   'uncredited interest). (est) means the rate is still a seed — /interest clears it.',
 ].join('\n');
+
+/**
+ * The first five minutes, which used to be a wall of "not anchored" and no idea what to do.
+ *
+ * Shown until the first anchor exists, because until then every number in the app is zero
+ * and the balance table is nothing but a list of things that have not happened yet.
+ */
+export async function firstRun(db: Db, accounts: Account[]): Promise<string | null> {
+  if (await db.one('SELECT 1 FROM snapshots LIMIT 1')) return null;
+  const name = await db.getSetting('owner_name');
+  return [
+    name ? `Hi ${name} — let's set this up.` : "Welcome. I'm Tala, and I track your money in this chat.",
+    '',
+    ...(name ? [] : ['First, what should I call you?', '  /name Sean', '']),
+    `${name ? 'Tell' : 'Then tell'} me what each account actually holds right now. That is an ANCHOR — the real`,
+    'balance from your banking app — and everything gets counted forward from it.',
+    mono(accounts.map((a) => `${a.id} 1234.56`).join('\n')),
+    `Your accounts: ${accounts.map((a) => a.id).join(', ')}   (/account to add or close one)`,
+    '',
+    'After that, just say what you spend:  250 jollibee maribank',
+  ].join('\n');
+}
 
 /**
  * Dispatch a slash command. Returns null when it is not a command at all, so the caller
@@ -890,10 +925,26 @@ export async function runCommand(
 
   switch (cmd) {
     case 'start':
+      return { text: (await firstRun(db, accounts)) ?? HELP };
     case 'help':
       return { text: HELP };
+    case 'name': {
+      const current = await db.getSetting('owner_name');
+      if (!arg) {
+        return {
+          text: current
+            ? `I call you ${current}. Change it: /name Sean`
+            : 'What should I call you? /name Sean',
+        };
+      }
+      // Trimmed to something that fits in a sentence: this is interpolated into the model's
+      // system prompt, so a pasted essay would be prompt text, not a nickname.
+      const next = arg.replace(/\s+/g, ' ').trim().slice(0, 40);
+      await db.setSetting('owner_name', next);
+      return { text: `Got it — ${next} it is.` };
+    }
     case 'balance':
-      return { text: await balances(db, accounts, today) };
+      return { text: (await firstRun(db, accounts)) ?? (await balances(db, accounts, today)) };
     case 'recap':
       return { text: await recap(db, accounts, rest[0] || today.slice(0, 7)) };
     case 'snap':
@@ -947,8 +998,7 @@ export async function accountsCmd(db: Db, arg: string): Promise<Reply> {
     return {
       text: [
         'Accounts — this list is the closed set the extractor may choose from.',
-        ...lines,
-        '',
+        mono(lines.join('\n')),
         `/account add <id> <${BOOKS.join('|')}> <${KINDS.join('|')}> [display name]`,
         '/account off <id>     close it (history stays, extractor stops offering it)',
         '/account on <id>      reopen it',
