@@ -175,7 +175,7 @@ to undo. One value you set once has no race at all.
 Do this before Render. A local restart is one second; a Render redeploy is two minutes.
 
 ```bash
-npm test          # must be 36/36 before you trust any number it shows you
+npm test          # must be 45/45 before you trust any number it shows you
 npm run typecheck
 ```
 
@@ -251,7 +251,9 @@ confirmation step you wanted.
 Absence is a deterministic gate; "I'm 70% sure it said Jollibee" is not, and gating money on
 a model's confidence is gating it on a vibe.
 
-**Checkpoint.** Confirm the append-only triggers are live. This must fail:
+**Checkpoint.** `npm test` already proves the triggers work against an in-memory database
+(`test/schema.test.ts`). This confirms they actually loaded into *your* Turso database — a
+schema can load with its triggers silently missing if the multi-statement parse breaks:
 
 ```bash
 turso db shell tala "UPDATE events SET amount_centavos = 1 WHERE id = 1"

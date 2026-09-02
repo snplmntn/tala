@@ -3,8 +3,28 @@
  * the INTEGER centavos all work unchanged, and `sqlite3 .dump` remains the exit path.
  *
  * Chosen over Render's own Postgres for one disqualifying reason: a free Render Postgres is
- * DELETED 30 days after creation. A ledger you intend to keep for five years cannot live on
- * a clock like that.
+ * DELETED 44 days after creation, on a clock that runs from creation and that daily use does
+ * not extend. A ledger you intend to keep for five years cannot live on that.
+ *
+ * It stays over Supabase and Neon for a different reason, recorded here so the decision does
+ * not get re-litigated from scratch: ZERO migration. Every candidate is durable enough (Neon
+ * states "None of these limits delete your data"; Supabase's pause needs a 7-day activity
+ * drought this app cannot produce) and none requires a card, so durability and price do not
+ * separate the field. What separates it is that a Postgres port rewrites `events_append_only`
+ * — a conditional trigger freezing 17 columns while allowing three to be set exactly once —
+ * as ~30 lines of PL/pgSQL, and `REVOKE UPDATE` cannot replace it because this app
+ * legitimately updates events, inbox and accounts. That is a rewrite of the one guarantee the
+ * schema exists to make. test/schema.test.ts is the oracle that would have to pass first.
+ *
+ * Postgres also hides two silent money traps worth knowing before anyone tries: `integer` is
+ * 4 bytes and caps at ₱21,474,836.47 where SQLite's INTEGER is dynamic, and node-postgres
+ * returns BIGINT as a STRING, so "100" + "200" evaluates to "100200" in a ledger whose whole
+ * arithmetic is numeric. Neither throws.
+ *
+ * Never opt into `tursodb`, the Rust rewrite: its own COMPAT.md states that under MVCC "a
+ * write that reported success is not durable while sibling statements remain active, and it is
+ * silently rolled back if the transaction then ends abnormally". A silently rolled-back
+ * acknowledged write is the worst failure mode available to an append-only ledger.
  *
  * Every multi-row write that must be atomic goes through `batch`. Two sequential awaits is
  * how you get half a ₱3,000 transfer with nothing detecting the orphan.

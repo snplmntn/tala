@@ -122,6 +122,16 @@ then exceeds twice the new reference and is rejected forever.
   would climb forever with reconciliation blaming you.
 - **Five years is ~10,000 rows and single-digit megabytes.** No archival, no partitioning,
   no rollup tables. This sentence exists to pre-kill them.
+- **Turso stays because a switch costs ~400 lines and buys nothing** — not because it is the
+  safest provider. It has lost free-tier data once (Dec 2023: cross-tenant leak plus ~3 days
+  of writes, on the fly.io architecture since retired), its free plan blocks READS as well as
+  writes if any single metric is exceeded, and it has cut free-tier allowances twice — once
+  unannounced. At 0.2% of the storage quota per year none of that is reachable, and the daily
+  encrypted dump is a better durability story than any provider's promises. **Flip
+  conditions:** another cut → pay $4.99 (10-day PITR, no archiving) rather than migrate;
+  libSQL announced as retiring from Turso Cloud → migrate to **Neon**, not Supabase; a second
+  consumer of this data (a phone app, a dashboard) → then and only then does Postgres with
+  RLS buy something instead of relocating the risk.
 
 ## Deploy
 
@@ -191,7 +201,7 @@ the social-engineering attacks that _do_ move money on PH e-wallets.
 ## Verify
 
 ```bash
-npm test         # 36 asserts, node --test, no framework
+npm test         # 45 asserts across 2 files, node --test, no framework
 npm run typecheck
 npm run format
 npm run chat     # talk to a local SQLite copy — no Telegram, no bot token, no deploy
@@ -222,4 +232,5 @@ src/index.ts        long-poll loop, Manila-midnight scheduler, /healthz
 scripts/chat.ts     terminal REPL against a local SQLite file — the fast dev loop
 scripts/backup.ts   portable SQL dump — the backup and the exit from Turso
 test/ledger.test.ts the identity, and the only thing that can falsify it
+test/schema.test.ts the append-only triggers, against a real in-memory database
 ```
