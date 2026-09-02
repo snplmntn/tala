@@ -17,7 +17,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 import { Db } from '../src/db.ts';
-import { applyEvent, callback } from '../src/handlers.ts';
+import { anchorAccount, applyEvent, balances, callback } from '../src/handlers.ts';
 
 const SCHEMA = readFileSync(new URL('../schema.sql', import.meta.url), 'utf8');
 
@@ -319,4 +319,69 @@ test('a spoken question is answered, not redirected to a slash command', async (
   );
   assert.match(reply.text, /Maya Savings/, 'it should answer with the balance itself');
   assert.doesNotMatch(reply.text, /Ask with/, 'not a pointer to a command');
+});
+
+// ── the first anchor, when spending was already logged ──────────────────────
+
+test('an un-anchored account is excluded from the book total, and says so', async () => {
+  // The bug this replaced: a ₱250 cash expense with no anchor reported a -₱250 BALANCE and
+  // dragged the whole book's "expected" to -₱250 — presenting an unknown baseline plus a
+  // known outflow as net worth. A total must be either right or visibly incomplete.
+  const db = await fresh();
+  const accounts = await db.accounts();
+  await db.run(
+    `INSERT INTO events (type, book, account_id, amount_centavos, category, occurred_at, logged_at)
+     VALUES ('expense','personal','cash',-25000,'food','2026-09-03','2026-09-03T00:00:00Z')`,
+  );
+
+  const out = await balances(db, accounts, '2026-09-03');
+  assert.match(out, /Cash on hand\s+not anchored\s+₱250\.00 logged/);
+  assert.doesNotMatch(out, /-₱250\.00/, 'a flow must never be rendered as a negative balance');
+  // Per book, because each book has its own total to qualify.
+  assert.match(out, /excludes 5 un-anchored: maya, maribank, gcash, bdo, cash/);
+  assert.match(out, /excludes 1 un-anchored: gotyme/);
+});
+
+test('the first anchor asks whether the count was before or after logged spending', async () => {
+  // Nothing in the data distinguishes "₱1,500 is in my wallet now, after the ₱250" from
+  // "₱1,500 is what I had before it". The two differ by exactly that ₱250, so guessing
+  // either way silently corrupts the baseline every later balance inherits.
+  const db = await fresh();
+  const accounts = await db.accounts();
+  const cash = accounts.find((a) => a.id === 'cash')!;
+  await db.run(
+    `INSERT INTO events (type, book, account_id, amount_centavos, category, occurred_at, logged_at)
+     VALUES ('expense','personal','cash',-25000,'food','2026-09-03','2026-09-03T00:00:00Z')`,
+  );
+
+  const r = await anchorAccount(db, cash, 150_000, '2026-09-03');
+  assert.match(r.text, /already logged ₱250\.00/);
+  assert.ok(r.keyboard, 'it must ask, not choose');
+  assert.equal(r.keyboard![0][0].callback_data, 'anchored:cash');
+  assert.equal(r.keyboard![1][0].callback_data, 'anchorsub:cash:-25000');
+
+  // Counted-after: the anchor stands alone, spending stays in the recap only.
+  assert.match(await callback(db, 'anchored:cash', '2026-09-03'), /kept as counted/);
+  assert.match(await balances(db, accounts, '2026-09-03'), /Cash on hand\s+₱1,500\.00/);
+
+  // Counted-before: an explicit adjustment applies it. The anchor itself is never rewritten,
+  // so the ledger records why the balance differs from the figure that was typed.
+  assert.match(await callback(db, 'anchorsub:cash:-25000', '2026-09-03'), /balance is now ₱1,250\.00/);
+  assert.match(await balances(db, accounts, '2026-09-03'), /Cash on hand\s+₱1,250\.00/);
+
+  const [anchor] = await db.all<{ balance_centavos: number }>(
+    "SELECT balance_centavos FROM snapshots WHERE account_id = 'cash'",
+  );
+  assert.equal(anchor.balance_centavos, 150_000, 'the anchor keeps the figure you typed');
+});
+
+test('a later anchor does not ask again', async () => {
+  // The ambiguity is a first-anchor problem only. After that, drift answers the same
+  // question quantitatively and the three-button tag explains it.
+  const db = await fresh();
+  const cash = (await db.accounts()).find((a) => a.id === 'cash')!;
+  await anchorAccount(db, cash, 150_000, '2026-09-01');
+  const second = await anchorAccount(db, cash, 140_000, '2026-09-03');
+  assert.doesNotMatch(second.text, /already logged/);
+  assert.match(second.text, /drift/, 'it reports drift instead');
 });

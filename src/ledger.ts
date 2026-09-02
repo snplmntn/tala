@@ -274,11 +274,16 @@ export function balanceOf(
   rows: Event[],
   today: string,
 ): Balance {
+  // An un-anchored account has NO BALANCE — it has a running total of flows with no
+  // baseline. Reporting that sum as a balance says "you have -₱500", which is not what is
+  // known: what is known is "₱500 left, from an unknown starting point". The caller must
+  // render it as a flow and leave it OUT of any book total, or one un-anchored account
+  // silently makes the whole book's net worth wrong.
   if (!anchor) {
     const all = effective(rows).filter((r) => r.account_id === account.id);
     return {
       accountId: account.id,
-      confirmed: sum(all),
+      confirmed: sum(all), // a NET FLOW, not a balance — anchorDate === null says so
       accrued: 0,
       expected: sum(all),
       anchorDate: null,

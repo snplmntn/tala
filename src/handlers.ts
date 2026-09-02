@@ -412,6 +412,37 @@ export async function anchorAccount(
   }
 
   await db.batch(writes);
+
+  // FIRST anchor with spending already logged: genuinely ambiguous, and the two readings
+  // differ by exactly that spending. Counting your wallet AFTER spending means the money is
+  // already gone and subtracting again double-counts; counting BEFORE means it must still
+  // come off. Nothing in the data can tell these apart, and it can only ever happen once per
+  // account, so ask at the one moment the answer exists.
+  if (!prev) {
+    const prior = sum(
+      effective(await db.eventsSince(account.id, '0000-00-00')).filter((r) => r.type !== 'adjustment'),
+    );
+    if (prior !== 0) {
+      lines.push(
+        '',
+        `You already logged ${peso(Math.abs(prior))} on this account before anchoring it.`,
+        `Is ${peso(balance)} what's there NOW (already spent), or what you had BEFORE that?`,
+      );
+      return {
+        text: lines.join('\n'),
+        keyboard: [
+          [{ text: `✓ ${peso(balance)} is what's there now`, callback_data: `anchored:${account.id}` }],
+          [
+            {
+              text: `↓ subtract the ${peso(Math.abs(prior))}`,
+              callback_data: `anchorsub:${account.id}:${prior}`,
+            },
+          ],
+        ],
+      };
+    }
+  }
+
   if (account.rate > 0) {
     lines.push(`what interest did it credit since the last anchor? reply: /interest ${account.id} 653`);
   }
@@ -431,23 +462,42 @@ export async function balances(db: Db, accounts: Account[], today: string): Prom
     let accrued = 0;
     const lines: string[] = [];
 
+    const unanchored: string[] = [];
+
     for (const a of inBook) {
       const anchor = await db.latestSnapshot(a.id);
       const rows = anchor
         ? await db.eventsSince(a.id, anchor.as_of_date)
         : await db.eventsSince(a.id, '0000-00-00');
       const b = balanceOf(a, anchor, rows, today);
+
+      if (!b.anchorDate) {
+        // Never folded into the total. An unknown baseline plus a known outflow is not a
+        // balance — reporting it as one says "you have -₱250", when what is actually known
+        // is "₱250 left, from a starting point nobody has told me". Letting it in would make
+        // the book's net worth quietly wrong instead of visibly incomplete.
+        unanchored.push(a.id);
+        const flow = b.confirmed === 0 ? 'nothing logged yet' : `${peso(Math.abs(b.confirmed))} logged`;
+        lines.push(`  ${a.name.padEnd(13)} ${'not anchored'.padStart(12)}   ${flow}`);
+        continue;
+      }
+
       confirmed += b.confirmed;
       accrued += b.accrued;
       if (b.estimated) anyEstimated = true;
-
-      const age =
-        b.anchorAgeDays == null ? 'no anchor' : b.anchorAgeDays === 0 ? 'today' : `${b.anchorAgeDays}d`;
+      const age = b.anchorAgeDays === 0 ? 'today' : `${b.anchorAgeDays}d`;
       lines.push(
         `  ${a.name.padEnd(13)} ${peso(b.confirmed).padStart(12)}   ${age}${b.estimated ? ' (est)' : ''}`,
       );
     }
+
     out.push(`${book}`, ...lines, `  ${'expected'.padEnd(13)} ${peso(confirmed + accrued).padStart(12)}`);
+    if (unanchored.length) {
+      // Say what the total is missing, in the same breath as the total.
+      out.push(
+        `  excludes ${unanchored.length} un-anchored: ${unanchored.join(', ')} — /snap ${unanchored[0]} <amount>`,
+      );
+    }
   }
 
   const all = await db.allEvents();
@@ -559,6 +609,32 @@ export async function callback(db: Db, data: string, today: string): Promise<str
     const r = await anchorAccount(db, account, Number(b), today);
     return r.text;
   }
+  if (kind === 'anchored') return 'kept as counted — the earlier spending stays in your recap only';
+
+  if (kind === 'anchorsub') {
+    const account = (await db.accounts()).find((x) => x.id === a);
+    if (!account) return 'unknown account';
+    const anchor = await db.latestSnapshot(account.id);
+    if (!anchor) return 'no anchor to adjust';
+    const amount = Number(b);
+    // Applied as an explicit adjustment dated after the anchor, not by moving the anchor.
+    // The anchor stays exactly the figure you typed, and the ledger records why the balance
+    // differs from it — which is the whole point of never mutating a row.
+    await db.batch([
+      db.insertEvent({
+        type: 'adjustment',
+        book: account.book,
+        account_id: account.id,
+        amount_centavos: amount,
+        category: 'reclassified',
+        occurred_at: addDays(anchor.as_of_date, 1),
+        logged_at: nowIso(),
+        note: 'pre-anchor spending applied on request',
+      } as never),
+    ]);
+    return `applied ${peso(Math.abs(amount))} — balance is now ${peso(anchor.balance_centavos + amount)}`;
+  }
+
   if (kind === 'nope') return 'cancelled';
   if (kind === 'tx') return 'reply: transfer <amount> <from> to <to>, then void the expense';
   if (kind === 'fix') return 'reply with the correction, e.g. "the jollibee was 285 not 250"';
