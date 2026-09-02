@@ -216,7 +216,8 @@ src/ledger.ts       PURE. money, Manila dates, the accrual fold, drift, the rate
 src/db.ts           Turso. every atomic multi-row write goes through batch()
 src/extract.ts      the only place the LLM lives. one fetch, strict JSON schema
 src/telegram.ts     transport. the bot token never leaves this file
-src/handlers.ts     typed events in, rows out
+src/handlers.ts     typed events in, rows out — plus COMMANDS, the one command table
+                    that drives /help, Telegram's "/" menu, and both dispatchers
 src/index.ts        long-poll loop, Manila-midnight scheduler, /healthz
 scripts/chat.ts     terminal REPL against a local SQLite file — the fast dev loop
 scripts/backup.ts   portable SQL dump — the backup and the exit from Turso

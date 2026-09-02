@@ -13,7 +13,7 @@ import { createServer } from 'node:http';
 import { Db } from './db.ts';
 import { extract } from './extract.ts';
 import { addDays, dayDiff, manilaDate, peso } from './ledger.ts';
-import { applyEvent, balances, callback, csv, interest, rates, recap, snapshot, undo } from './handlers.ts';
+import { COMMANDS, applyEvent, balances, callback, runCommand } from './handlers.ts';
 import {
   answerCallback,
   deleteWebhook,
@@ -22,6 +22,7 @@ import {
   send,
   sendCsv,
   senderId,
+  setMyCommands,
   type Update,
 } from './telegram.ts';
 
@@ -126,34 +127,16 @@ async function handle(u: Update): Promise<void> {
 
   // Deterministic commands never reach the LLM. The anchor in particular is the one number
   // the design trusts unconditionally, so it does not go through a probabilistic parser.
+  // One dispatcher, shared with the local REPL, so the two can never drift.
   if (!hasPhoto && text.startsWith('/')) {
-    const [cmd, ...rest] = text.split(/\s+/);
-    const accounts = await db.accounts();
-    switch (cmd) {
-      case '/start':
-      case '/help':
-        return void (await send(TOKEN, m.chat.id, HELP));
-      case '/balance':
-        return void (await send(TOKEN, m.chat.id, await balances(db, accounts, today())));
-      case '/recap':
-        return void (await send(TOKEN, m.chat.id, await recap(db, accounts, rest[0] ?? today().slice(0, 7))));
-      case '/snap':
-      case '/snapshot': {
-        const r = await snapshot(db, accounts, rest.join(' '), today());
-        return void (await send(TOKEN, m.chat.id, r.text, r.keyboard));
+    const reply = await runCommand(db, await db.accounts(), text, today());
+    if (reply) {
+      if (reply.document) {
+        await sendCsv(TOKEN, m.chat.id, reply.document.filename, reply.document.content);
+      } else {
+        await send(TOKEN, m.chat.id, reply.text, reply.keyboard);
       }
-      case '/rate': {
-        const r = await rates(db, accounts, rest.join(' '));
-        return void (await send(TOKEN, m.chat.id, r.text, r.keyboard));
-      }
-      case '/interest': {
-        const r = await interest(db, accounts, rest.join(' '), today());
-        return void (await send(TOKEN, m.chat.id, r.text, r.keyboard));
-      }
-      case '/undo':
-        return void (await send(TOKEN, m.chat.id, await undo(db)));
-      case '/csv':
-        return void (await sendCsv(TOKEN, m.chat.id, `tala-${today()}.csv`, await csv(db)));
+      return;
     }
   }
 
@@ -205,24 +188,6 @@ async function handle(u: Update): Promise<void> {
   }
   await db.markInbox(inboxId, 'applied');
 }
-
-const HELP = `Tala — say what you spent.
-
-  250 jollibee maribank
-  jeep 15, load 50, lunch 90 gcash
-  600 dinner maribank, 400 not mine
-  sent 2k from maya to gotyme, fee 10
-  the jollibee was 285 not 250
-  (or send a receipt photo)
-
-/balance   confirmed vs expected, per book
-/recap     this month, or /recap 2026-08
-/snap      anchor a balance: /snap maya 98000
-/interest  report a real credit: /interest maya 21.48
-           (this is what replaces the estimated rate)
-/rate      see them, or set one: /rate maya 10% gross
-/undo      void the last entry
-/csv       the whole ledger as a spreadsheet`;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // The daily line. The single carrier for every alarm.
@@ -365,6 +330,9 @@ if (PAIRING) {
 
 // Long-polling and a webhook are mutually exclusive; clear one left by an earlier deploy.
 await deleteWebhook(TOKEN);
+// Populate Telegram's own "/" menu from the command table, so the commands are
+// discoverable in the UI and never drift from /help.
+await setMyCommands(TOKEN, COMMANDS);
 health();
 scheduler();
 await poll();

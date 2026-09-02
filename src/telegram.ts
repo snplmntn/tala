@@ -140,6 +140,18 @@ export async function getUpdates(token: string, offset: number, timeoutSec = 50)
   return json.result ?? [];
 }
 
+/**
+ * Register the "/" menu in Telegram's own UI.
+ *
+ * Done from code rather than by hand in BotFather, so the menu cannot drift from the
+ * command table that generates it — and a fresh deploy of a new bot is self-configuring.
+ */
+export async function setMyCommands(token: string, commands: readonly { name: string; help: string }[]) {
+  return call(token, 'setMyCommands', {
+    commands: commands.map((c) => ({ command: c.name, description: c.help })),
+  });
+}
+
 /** Clears any webhook left over from an earlier deploy — the two modes are exclusive. */
 export async function deleteWebhook(token: string) {
   return call(token, 'deleteWebhook', { drop_pending_updates: false });

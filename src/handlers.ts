@@ -38,6 +38,8 @@ import type { Keyboard } from './telegram.ts';
 export interface Reply {
   text: string;
   keyboard?: Keyboard;
+  /** /csv answers with a file rather than a message. */
+  document?: { filename: string; content: string };
 }
 
 const acct = (accounts: Account[], id: string | null) => accounts.find((a) => a.id === id) ?? null;
@@ -670,4 +672,86 @@ export async function interest(db: Db, accounts: Account[], arg: string, today: 
     if (learned.implied > 0) lines.push(`(this credit implies ${(learned.implied * 100).toFixed(2)}%)`);
   }
   return { text: lines.join('\n') };
+}
+
+// ── one command table, four consumers ───────────────────────────────────────
+
+/**
+ * The single source of truth for commands.
+ *
+ * It drives the /help text, Telegram's own "/" menu via setMyCommands, and the dispatcher
+ * that BOTH the bot and the local REPL call. Keeping four copies in step by hand is how
+ * /help ends up working in Telegram and not in the REPL — which is exactly what happened
+ * before this existed.
+ */
+export const COMMANDS = [
+  { name: 'balance', args: '', help: 'confirmed vs expected, per book' },
+  { name: 'recap', args: '[YYYY-MM]', help: 'this month, or a past one' },
+  { name: 'snap', args: '<account> <amount>', help: 'anchor a real balance from your banking app' },
+  { name: 'interest', args: '<account> <amount>', help: 'report a credit; the rate learns from it' },
+  { name: 'rate', args: '[account] [10% gross]', help: 'see rates, or set one' },
+  { name: 'owed', args: '', help: 'money you fronted that has not come back' },
+  { name: 'undo', args: '', help: 'void the last entry' },
+  { name: 'csv', args: '', help: 'the whole ledger as a spreadsheet' },
+  { name: 'help', args: '', help: 'this' },
+] as const;
+
+export const HELP = [
+  'Tala — say what you spent.',
+  '',
+  '  250 jollibee maribank',
+  '  jeep 15, load 50, lunch 90 gcash',
+  '  600 dinner maribank, 400 not mine',
+  '  sent 2k from maya to gotyme, fee 10',
+  '  the jollibee was 285 not 250',
+  '  (or send a receipt photo)',
+  '',
+  ...COMMANDS.map((c) => `/${c.name}${c.args ? ' ' + c.args : ''}`.padEnd(34) + c.help),
+  '',
+  'Balances show confirmed (what the bank credited) and expected (plus today’s',
+  'uncredited interest). (est) means the rate is still a seed — /interest clears it.',
+].join('\n');
+
+/**
+ * Dispatch a slash command. Returns null when it is not a command at all, so the caller
+ * falls through to the LLM. Deterministic: nothing here goes near the extractor.
+ */
+export async function runCommand(
+  db: Db,
+  accounts: Account[],
+  line: string,
+  today: string,
+): Promise<Reply | null> {
+  if (!line.startsWith('/')) return null;
+  const [raw, ...rest] = line.split(/\s+/);
+  const cmd = raw.slice(1).toLowerCase();
+  const arg = rest.join(' ');
+
+  switch (cmd) {
+    case 'start':
+    case 'help':
+      return { text: HELP };
+    case 'balance':
+      return { text: await balances(db, accounts, today) };
+    case 'recap':
+      return { text: await recap(db, accounts, rest[0] || today.slice(0, 7)) };
+    case 'snap':
+    case 'snapshot':
+      return snapshot(db, accounts, arg, today);
+    case 'interest':
+      return interest(db, accounts, arg, today);
+    case 'rate':
+    case 'rates':
+      return rates(db, accounts, arg);
+    case 'owed': {
+      const owed = unsettled(await db.allEvents());
+      return { text: owed > 0 ? `owed to you: ${peso(owed)}` : 'nothing outstanding' };
+    }
+    case 'undo':
+      return { text: await undo(db) };
+    case 'csv':
+      return { text: 'ledger attached', document: { filename: `tala-${today}.csv`, content: await csv(db) } };
+    default:
+      return { text: `Unknown command /${cmd}. Try /help` };
+  }
 }

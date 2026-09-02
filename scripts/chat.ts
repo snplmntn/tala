@@ -22,17 +22,7 @@ import { stdin, stdout } from 'node:process';
 import { Db } from '../src/db.ts';
 import { extract } from '../src/extract.ts';
 import { manilaDate } from '../src/ledger.ts';
-import {
-  applyEvent,
-  balances,
-  callback,
-  csv,
-  interest,
-  rates,
-  recap,
-  snapshot,
-  undo,
-} from '../src/handlers.ts';
+import { HELP, applyEvent, callback, runCommand } from '../src/handlers.ts';
 
 const args = new Set(process.argv.slice(2));
 const remote = args.has('--remote');
@@ -83,7 +73,8 @@ Type like you would in Telegram:
   sent 2k from maya to gotyme, fee 10
   the jollibee was 285 not 250
 
-Commands: /balance /recap /snap /interest /rate /undo /csv
+Type /help for the full command list.
+
 Meta:     :raw <json>   apply a hand-written event, skipping the LLM
           :tap <data>   fire an inline-button callback, e.g. :tap ok:1
           :sql <query>  read the ledger directly
@@ -99,27 +90,20 @@ async function handle(line: string): Promise<void> {
   const t = today();
   const accounts = await db.accounts();
 
-  if (line.startsWith('/')) {
-    const [cmd, ...rest] = line.split(/\s+/);
-    const arg = rest.join(' ');
-    switch (cmd) {
-      case '/balance':
-        return console.log(await balances(db, accounts, t));
-      case '/recap':
-        return console.log(await recap(db, accounts, rest[0] ?? t.slice(0, 7)));
-      case '/snap':
-        return console.log((await snapshot(db, accounts, arg, t)).text);
-      case '/interest':
-        return console.log((await interest(db, accounts, arg, t)).text);
-      case '/rate':
-        return console.log((await rates(db, accounts, arg)).text);
-      case '/undo':
-        return console.log(await undo(db));
-      case '/csv':
-        return console.log(await csv(db));
-      default:
-        return console.log(`unknown command ${cmd}`);
-    }
+  // The SAME dispatcher the Telegram bot uses, so a command can never work in one and not
+  // the other — which is exactly how /help ended up missing here.
+  const reply = await runCommand(db, accounts, line, t);
+  if (reply) {
+    console.log(reply.document ? reply.document.content : reply.text);
+    if (reply.keyboard)
+      console.log(
+        '  buttons:',
+        reply.keyboard
+          .flat()
+          .map((b) => b.callback_data)
+          .join(' '),
+      );
+    return;
   }
 
   // Meta commands exist so the ledger can be exercised without the LLM in the loop —
