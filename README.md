@@ -157,6 +157,17 @@ then exceeds twice the new reference and is rejected forever.
 - **Interest is attributed to the day it is earned, not the day it posts.** A single day's
   boundary can differ from the app by one day's interest (~₱21 on Maya). Model the post lag
   only if a snapshot disagrees by exactly that.
+- **A reply the app asked for by name is a typed command, never a parsed message.** The
+  transfer echo invites `fee 10`, so `runCommand` answers to it with no slash. It used to
+  reach the extractor, which still had the transfer in its transcript and emitted the whole
+  thing a second time — one ₱5,288.50 move became two. Anything else the app ever dictates
+  belongs on that path for the same reason.
+- **"All of it" is resolved by code, not by the model.** `whole_balance` is a boolean the
+  extractor sets; the figure comes from the same `balanceFor` /balance uses, so the model
+  still never sees a balance and never produces one. The derived number carries whatever
+  drift the account was already holding, and emptying the account moves that drift to the
+  destination — where the next anchor names it, instead of hiding it in an account the app
+  now shows as zero. An unanchored account has no balance at all, so it asks.
 - **Intra-provider shuffles are not logged.** Moving ₱2,000 from savings to wallet for ten
   days mis-attributes about ₱1.64. Revisit if you start moving six figures around.
 - **Maya's boost re-qualifies monthly** on ₱25,000 of qualifying spend, and applies to the

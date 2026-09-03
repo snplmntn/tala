@@ -14,7 +14,7 @@ import { Db, type Account } from './db.ts';
 import { CATEGORIES, resolveDate, type Extracted } from './extract.ts';
 import { addDays, bookingDate, lateEntryPair, parseAmount, peso, type Event } from './ledger.ts';
 import { acct, nowIso, rowKeys, type Reply } from './reply.ts';
-import { learnFromCredit, remaining, remainingFor } from './reports.ts';
+import { balanceFor, learnFromCredit, remaining, remainingFor } from './reports.ts';
 
 export async function money(
   db: Db,
@@ -100,13 +100,31 @@ export async function transfer(
   e: Extracted,
   ctx: { inboxId: number; today: string },
 ): Promise<Reply> {
-  const amount = parseAmount(e.amount);
+  let amount = parseAmount(e.amount);
   const from = acct(accounts, e.account);
   const to = acct(accounts, e.to_account);
-  if (amount == null) return { text: 'How much is the transfer?' };
+  // Accounts before the amount, because "all of it" has no figure until the source is known.
   if (!from || !to)
     return { text: `Transfer from which account to which? (${accounts.map((a) => a.id).join(' / ')})` };
   if (from.id === to.id) return { text: 'Source and destination are the same account.' };
+
+  // "move all of my gcash" states no figure, so CODE supplies the one /balance already
+  // computes — the model still never sees a balance and never produces one. The derived
+  // figure carries whatever drift the account was already holding; emptying it moves that
+  // drift to the destination, where the next anchor names it, instead of leaving it hidden
+  // in an account the app now shows as zero. An UNANCHORED account has no balance at all,
+  // only a running total, so there it asks rather than inventing one.
+  const wholeOf = amount == null && e.whole_balance ? await balanceFor(db, from, ctx.today) : null;
+  if (wholeOf) {
+    if (!wholeOf.anchorDate)
+      return {
+        text: `${from.name} is not anchored, so I do not know what is in it. /snap ${from.id} <amount>`,
+      };
+    if (wholeOf.confirmed <= 0)
+      return { text: `${from.name} is at ${peso(wholeOf.confirmed)} by my books. How much is the transfer?` };
+    amount = wholeOf.confirmed;
+  }
+  if (amount == null) return { text: 'How much is the transfer?' };
 
   // Random, not the clock. `Date.now()` collided whenever two transfers landed in the same
   // millisecond, and then brokenTransfers() saw one group with four legs and called BOTH
@@ -169,7 +187,12 @@ export async function transfer(
   await db.batch(rows.map((r) => db.insertEvent(r as never)));
 
   const crossBook = from.book !== to.book;
-  const lines = [`${peso(Math.abs(amount))} · ${from.name} → ${to.name}${fee ? ` (+${peso(fee)} fee)` : ''}`];
+  // Said out loud when the figure was derived: it is my count of that account, not a
+  // number read off the app, and the difference is the user's to catch.
+  const whole = wholeOf ? ' · all of it, by my books' : '';
+  const lines = [
+    `${peso(Math.abs(amount))} · ${from.name} → ${to.name}${fee ? ` (+${peso(fee)} fee)` : ''}${whole}`,
+  ];
   if (crossBook) {
     // Not a net-worth drop: it is you capitalising the company, or drawing from it.
     lines.push(to.book === 'business' ? 'recorded as an owner contribution' : 'recorded as an owner draw');
@@ -182,6 +205,57 @@ export async function transfer(
   // carries no buttons to hang the answer on, so it goes inline.
   lines.push(`${await remaining(db, from, ctx.today)}, ${await remaining(db, to, ctx.today)}`);
   return { text: lines.join('\n') };
+}
+
+/**
+ * `fee 10` — the InstaPay charge, attached to the transfer that just asked for it.
+ *
+ * The transfer reply invites this reply by name, and until now nothing answered to it: the
+ * message went to the extractor, which still had the whole transfer in its transcript and
+ * dutifully emitted it AGAIN with a fee on it. One ₱5,288.50 move became two. So the reply
+ * the app asks for is a typed command, like /snap — the only messages that get parsed are
+ * the ones the app did not dictate.
+ *
+ * The row carries the transfer's inbox_id, not this message's, so 🗑 void and /undo still
+ * take the fee with the transfer exactly as they do when the fee arrives inline.
+ */
+export async function feeCmd(db: Db, accounts: Account[], arg: string, today: string): Promise<Reply> {
+  const amount = parseAmount(arg);
+  if (amount == null) return { text: 'How much was the fee? e.g. fee 10' };
+  if (amount === 0) return { text: 'No fee, nothing written.' };
+
+  // The SOURCE leg: the fee is charged by the account the money left.
+  const leg = await db.one<Event>(
+    "SELECT * FROM events WHERE type = 'transfer' AND amount_centavos < 0 AND voided_at IS NULL ORDER BY id DESC LIMIT 1",
+  );
+  if (!leg) return { text: 'No transfer to attach a fee to.' };
+  const already = await db.one<Event>(
+    "SELECT * FROM events WHERE transfer_id = ? AND category = 'fees' AND voided_at IS NULL",
+    [leg.transfer_id ?? ''],
+  );
+  if (already)
+    return {
+      text: `That transfer already has a ${peso(Math.abs(already.amount_centavos))} fee. Correct it instead.`,
+    };
+
+  const account = acct(accounts, leg.account_id);
+  if (!account) return { text: 'That transfer is on an account I no longer have.' };
+  const anchor = await db.latestSnapshot(account.id);
+  const { date, lateFor } = bookingDate(leg.occurred_at, anchor?.as_of_date ?? null);
+  const row = {
+    inbox_id: leg.inbox_id ?? null,
+    transfer_id: leg.transfer_id,
+    type: 'expense',
+    book: account.book,
+    account_id: account.id,
+    amount_centavos: -Math.abs(amount),
+    category: 'fees',
+    note: 'transfer fee',
+    occurred_at: date,
+    logged_at: nowIso(),
+  };
+  await db.batch((lateFor ? lateEntryPair(row, lateFor) : [row]).map((r) => db.insertEvent(r as never)));
+  return { text: `${peso(amount)} fee · ${account.name}\n${await remaining(db, account, today)}` };
 }
 
 // ── correction ──────────────────────────────────────────────────────────────

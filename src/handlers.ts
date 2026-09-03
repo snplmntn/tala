@@ -13,7 +13,7 @@
 import { Db, type Account } from './db.ts';
 import { answer, type Extracted, type Turn } from './extract.ts';
 import { WEEKDAYS, addDays, dayDiff, peso, reminderDue, unsettled, type Event } from './ledger.ts';
-import { correct, money, transfer, undo, voidWithSiblings } from './entries.ts';
+import { correct, feeCmd, money, transfer, undo, voidWithSiblings } from './entries.ts';
 import { anchorAccount, proposeAnchor, snapshot } from './anchors.ts';
 import { balances, csv, interest, queryFacts, rates, recap, remaining, remainingFor } from './reports.ts';
 import { acct, noAccount, nowIso, type CallbackReply, type Reply } from './reply.ts';
@@ -225,6 +225,7 @@ export const COMMANDS = [
   { name: 'balance', args: '', help: 'confirmed vs expected, per book' },
   { name: 'recap', args: '[today|week|month|YYYY-MM-DD] [list]', help: 'what you spent, itemised' },
   { name: 'snap', args: '<account> <amount>', help: 'anchor a real balance from your banking app' },
+  { name: 'fee', args: '<amount>', help: 'attach a transfer fee to the transfer just logged' },
   { name: 'interest', args: '[<account> <amount> [date]]', help: 'what you have earned, or report a credit' },
   { name: 'rate', args: '[account] [10% gross]', help: 'see rates, or set one' },
   { name: 'owed', args: '', help: 'money you fronted that has not come back' },
@@ -293,8 +294,13 @@ export async function runCommand(
   line: string,
   today: string,
 ): Promise<Reply | null> {
-  if (!line.startsWith('/')) return null;
-  const [raw, ...rest] = line.split(/\s+/);
+  // The transfer reply asks for "fee 10" BY NAME and without a slash, so answer to it
+  // without one. A message the app dictated must never reach the extractor: the transfer is
+  // still in its transcript, and it emits the whole thing a second time. Here rather than in
+  // the bot's dispatcher so the REPL cannot answer differently.
+  const typed = /^fee\b/i.test(line) ? `/${line}` : line;
+  if (!typed.startsWith('/')) return null;
+  const [raw, ...rest] = typed.split(/\s+/);
   const cmd = raw.slice(1).toLowerCase();
   const arg = rest.join(' ');
 
@@ -327,6 +333,8 @@ export async function runCommand(
       return snapshot(db, accounts, arg, today);
     case 'interest':
       return interest(db, accounts, arg, today);
+    case 'fee':
+      return feeCmd(db, accounts, arg, today);
     case 'rate':
     case 'rates':
       return rates(db, accounts, arg);

@@ -65,6 +65,8 @@ export interface Extracted {
   match_amount: string | null;
   match_merchant: string | null;
   looks_like_transfer: boolean;
+  /** "move all of my gcash" — the amount is the source account's whole balance, which only code may compute. */
+  whole_balance: boolean;
   /** Only for intent: open_account — the display name as written. The id is derived; the kind is asked. */
   new_account: string | null;
   new_account_book: 'personal' | 'business' | null;
@@ -146,6 +148,7 @@ function schema(accountIds: string[]) {
             'match_amount',
             'match_merchant',
             'looks_like_transfer',
+            'whole_balance',
             'new_account',
             'new_account_book',
             'reply',
@@ -231,6 +234,13 @@ function schema(accountIds: string[]) {
               description:
                 'true if the wording is sent/moved/transferred/cash-in — even when intent is expense',
             },
+            whole_balance: {
+              type: 'boolean',
+              description:
+                'true when the amount IS the whole balance of the source account instead of a figure — ' +
+                '"transfer all of my gcash", "move everything in maya", "cash out my whole gcash", "lahat". ' +
+                'Still return amount: null; the app looks the balance up.',
+            },
             new_account: {
               ...nullableString,
               description:
@@ -275,6 +285,7 @@ HARD RULES:
 - "for myself" means shared_amount is null. Only set shared_amount when the user says they covered others.
 - A refund or money back is intent: expense with a POSITIVE amount and the same category as the original.
 - Set looks_like_transfer: true whenever the wording is sent / moved / transferred / cash-in / padala / load-up, even if you also chose intent: expense. Moving your own money between your accounts is a transfer, not spending.
+- "all of it" / "everything" / "lahat" / "my whole gcash" is not an amount. Return amount: null and whole_balance: true, with account = the account being emptied. Never guess what the balance is — you have not been told it.
 - Split multi-item messages into separate events, one per SEPARATE PURCHASE ("jeep 15, load 50, lunch 90" is three events).
 - But a QUALIFIER about one purchase is NOT a second event. "600 dinner maribank, 400 not mine" is ONE expense of 600 with shared_amount 400. Phrases that mean shared_amount: "N not mine", "N is not mine", "N was theirs", "N is my friend's share", "I paid for N of it". Never emit a separate event for that number.
 - If you cannot tell what the user means, return a single event with intent: unknown.
@@ -283,6 +294,7 @@ THE CONVERSATION SO FAR IS CONTEXT, NOT DECORATION:
 - Earlier turns are given to you as real messages. If YOUR last message asked a question, the user's new message is almost certainly the ANSWER to it. Merge it with what was already established and emit the COMPLETE event.
 - "maribank" straight after you asked which account is that account — not a balance query. "32,330" straight after you asked what balance is that balance.
 - Never re-ask something the conversation already answered.
+- Context is NOT a queue: never emit an event you already emitted earlier in the conversation. A follow-up that adds a detail to something already recorded is a correction, or nothing at all — re-sending it books the money twice.
 
 TALKING BACK (intent: unknown only):
 - When nothing is being recorded, asked or corrected — a greeting, a thank-you, small talk, or something you genuinely could not read — return ONE event with intent: unknown and write the answer in "reply", in your own words, as Tala.

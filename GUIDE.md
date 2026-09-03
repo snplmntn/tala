@@ -96,6 +96,11 @@ sent 2k from maya to gotyme, fee 10
 
 > a transfer, not spending — your net worth did not change
 
+`transfer all of my gcash to maribank` needs no figure: the amount is whatever GCash stands
+at in the books, and the reply says so — check it against the app, because it is Tala's count
+and not a reading. If the fee only surfaces after you send it, reply `fee 10` on its own and
+it attaches to the transfer you just logged (`fee 0` if there was none).
+
 A receipt photo works too. It reads the merchant, the date and the total, then asks which
 account paid — no receipt on earth says which card was used.
 

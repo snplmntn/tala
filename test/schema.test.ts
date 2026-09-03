@@ -304,6 +304,7 @@ test('a natural-language anchor writes nothing until confirmed', async () => {
     match_amount: null,
     match_merchant: null,
     looks_like_transfer: false,
+    whole_balance: false,
     new_account: null,
     new_account_book: null,
     reply: null,
@@ -371,6 +372,7 @@ test('a spoken question is answered, not redirected to a slash command', async (
       match_amount: null,
       match_merchant: null,
       looks_like_transfer: false,
+      whole_balance: false,
       new_account: null,
       new_account_book: null,
       reply: null,
@@ -518,6 +520,7 @@ const spokenEvent = (p: Partial<Extracted>): Extracted => ({
   match_amount: null,
   match_merchant: null,
   looks_like_transfer: false,
+  whole_balance: false,
   new_account: null,
   new_account_book: null,
   reply: null,
@@ -1055,4 +1058,67 @@ test('the 08:00 close-out confirms what you slept on, and nothing from today', a
   assert.equal(await db.unconfirmedBefore(cutoff), 0, 'and confirming twice is a no-op');
   const open = await db.one<{ n: number }>('SELECT COUNT(*) AS n FROM events WHERE confirmed_at IS NULL');
   assert.equal(open?.n, 1, "today's entry keeps its buttons until tomorrow");
+});
+
+// ── "all of it", and the fee that must not re-book the transfer ─────────────
+
+test('moving ALL of an account resolves to the derived balance, and the fee reply does not re-book it', async () => {
+  // Two bugs, one conversation. "transferred all of gcash to maribank" carries no figure,
+  // so the bot asked "how much" forever — the model is forbidden to produce a balance and
+  // nothing else was filling one in. Then the transfer's own "reply: fee 10" invitation went
+  // to the extractor, which still had the transfer in its transcript and emitted it AGAIN.
+  const db = await fresh();
+  const accounts = await db.accounts();
+  await anchorAccount(
+    db,
+    accounts.find((a) => a.id === 'gcash')!,
+    528_850,
+    '2026-09-03',
+  );
+  await anchorAccount(
+    db,
+    accounts.find((a) => a.id === 'maribank')!,
+    3_209_330,
+    '2026-09-03',
+  );
+
+  const inboxId = await db.claim({ update_id: 1, has_photo: false, now: '2026-09-03T02:00:00Z' });
+  const moved = await applyEvent(
+    db,
+    accounts,
+    spokenEvent({ intent: 'transfer', account: 'gcash', to_account: 'maribank', whole_balance: true }),
+    { inboxId: inboxId!, today: '2026-09-03', hadPhoto: false },
+  );
+  assert.match(moved.text, /₱5,288\.50 · GCash → Maribank · all of it, by my books/);
+  assert.match(moved.text, /₱0\.00 left in GCash/);
+
+  // The invitation is answered by CODE. Bare, exactly as the reply asks for it.
+  const zero = await runCommand(db, accounts, 'fee 0', '2026-09-03');
+  assert.equal(zero!.text, 'No fee, nothing written.');
+
+  const fee = await runCommand(db, accounts, 'fee 10', '2026-09-03');
+  assert.match(fee!.text, /₱10\.00 fee · GCash/);
+  assert.match(fee!.text, /-₱10\.00 left in GCash/);
+
+  // The whole point: still ONE transfer, two legs. A re-emitted transfer would be four.
+  const legs = await db.all<{ n: number }>("SELECT COUNT(*) AS n FROM events WHERE type = 'transfer'");
+  assert.equal(legs[0].n, 2);
+
+  // A second fee is a correction, not another row.
+  const again = await runCommand(db, accounts, 'fee 15', '2026-09-03');
+  assert.match(again!.text, /already has a ₱10\.00 fee/);
+});
+
+test('an unanchored account has no balance to empty, so it asks instead of inventing one', async () => {
+  const db = await fresh();
+  const accounts = await db.accounts();
+  const inboxId = await db.claim({ update_id: 1, has_photo: false, now: '2026-09-03T02:00:00Z' });
+  const r = await applyEvent(
+    db,
+    accounts,
+    spokenEvent({ intent: 'transfer', account: 'gcash', to_account: 'maribank', whole_balance: true }),
+    { inboxId: inboxId!, today: '2026-09-03', hadPhoto: false },
+  );
+  assert.match(r.text, /not anchored/);
+  assert.equal((await db.all("SELECT * FROM events WHERE type = 'transfer'")).length, 0);
 });
