@@ -16,7 +16,7 @@ import { addDays, dayDiff, peso, unsettled, type Event } from './ledger.ts';
 import { correct, money, transfer, undo } from './entries.ts';
 import { anchorAccount, proposeAnchor, snapshot } from './anchors.ts';
 import { balances, csv, interest, rates, recap } from './reports.ts';
-import { nowIso, type CallbackReply, type Reply } from './reply.ts';
+import { acct, nowIso, type CallbackReply, type Reply } from './reply.ts';
 import { mono } from './telegram.ts';
 
 export { anchorAccount, proposeAnchor, snapshot } from './anchors.ts';
@@ -40,6 +40,15 @@ export async function applyEvent(
       return correct(db, accounts, e, ctx);
     case 'snapshot':
       return proposeAnchor(db, accounts, e, ctx.today);
+    case 'interest': {
+      // Straight to the command, same as open_account: /interest already owns the amount
+      // parsing, the date, the learner and the double-count warning. A second copy of any of
+      // that here is how the typed path and the spoken path drift into different answers.
+      if (!e.account)
+        return { text: `Which account credited that? (${accounts.map((a) => a.id).join(' / ')})` };
+      if (!e.amount) return { text: `${acct(accounts, e.account)?.name ?? e.account} — how much interest?` };
+      return interest(db, accounts, [e.account, e.amount, e.date_hint].filter(Boolean).join(' '), ctx.today);
+    }
     case 'open_account':
       // Straight to the command, arguments and all: /account add already owns the id rules,
       // the duplicate check and the credit-sign warning, and a second copy of that here is
@@ -159,7 +168,7 @@ export const COMMANDS = [
   { name: 'balance', args: '', help: 'confirmed vs expected, per book' },
   { name: 'recap', args: '[YYYY-MM]', help: 'this month, or a past one' },
   { name: 'snap', args: '<account> <amount>', help: 'anchor a real balance from your banking app' },
-  { name: 'interest', args: '<account> <amount>', help: 'report a credit; the rate learns from it' },
+  { name: 'interest', args: '[<account> <amount> [date]]', help: 'what you have earned, or report a credit' },
   { name: 'rate', args: '[account] [10% gross]', help: 'see rates, or set one' },
   { name: 'owed', args: '', help: 'money you fronted that has not come back' },
   { name: 'account', args: '[add|off|on] …', help: 'list accounts, or open and close them' },

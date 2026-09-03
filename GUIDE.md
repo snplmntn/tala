@@ -210,13 +210,46 @@ habit is leaking.
 If a pot earns interest, report the real credit when you see it in the app:
 
 ```
-/interest maya 21.48
+/interest maya 21.48                 today's credit
+/interest maya 21.48 yesterday       catching up
+/interest maya 21.48 2026-09-02      or an exact day
 ```
 
-Tala works backwards from the amount and the balance to learn the actual rate, so projections
-stop being a guess. Set one manually with `/rate maya 10% gross` — the word **gross** or
-**net** is required, never assumed, because the two differ by the 20% withholding tax and
-that is a 25% error on every projection the account will ever make.
+Or just say it: **"maya credited 21.48"**, **"got 8 pesos interest on maribank yesterday"**.
+
+Tala works backwards from the credit and the balance it was earned on to learn the actual
+rate, so projections stop being a guess. Each credit is divided by **its own period** — from
+the last credit you reported up to this one — so reporting daily teaches a daily rate and
+reporting once a month teaches a monthly one. Two readings are required before the rate
+moves, because one period can be partial.
+
+It does not matter whether you `/snap` before or after reporting the credit. The opening
+balance is taken from the anchor _before_ the credit's date, because an anchor read on the
+day a credit posted already contains that credit.
+
+Got the number wrong? Say so, and the rate re-learns from the corrected figure:
+
+```
+the maya interest was 22.10 not 21.48
+```
+
+### What have I earned?
+
+```
+/interest
+```
+
+Every credit you have reported, per account, with a subtotal each and a total at the bottom.
+Corrected credits count once, at the corrected amount; voided ones do not count at all.
+
+Set a rate manually with `/rate maya 10% gross` — the word **gross** or **net** is required,
+never assumed, because the two differ by the 20% withholding tax and that is a 25% error on
+every projection the account will ever make.
+
+> One overlap to know about: if you `/snap` **before** reporting a credit, the drift row from
+> that snapshot has already absorbed it. Reporting it afterwards would count the money twice,
+> so Tala says so and you can `/undo`. Either report the credit first, or tag the drift as
+> `interest` and skip the report.
 
 ---
 

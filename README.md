@@ -106,14 +106,29 @@ interest is no longer tracked.
 
 **Rates are net, and then learned.** Both banks advertise gross and credit net (Maya T&C
 4.6, MariBank help article 10070), and the PH withholds 20% final tax at source with no
-de minimis floor for interest. So seeds are `advertised × 0.80`, and reporting one real
-credit replaces the seed permanently:
+de minimis floor for interest. So seeds are `advertised × 0.80`, and reporting real credits
+replaces the seed permanently:
 
 ```
-/interest maya 21.48     -> rate learned: 8.02% net (was 8.00%)
-/rate                    -> see every rate and where it came from
-/rate maya 10% gross     -> set one by hand (the basis word is required)
+/interest                       -> every credit reported, per account, with a total
+/interest maya 21.48 [date]     -> rate learned: 8.02% net (was 8.00%)
+/rate                           -> see every rate and where it came from
+/rate maya 10% gross            -> set one by hand (the basis word is required)
 ```
+
+**A credit is divided by its own period, not by everything since the anchor.** The window is
+`(last reported credit, this credit]`, with the opening balance taken from the snapshot
+_before_ the credit's date — never one dated on it, since an anchor read on the day a credit
+posted already contains that credit. Both halves matter: dividing a single day's ₱21.48 by
+ten days of centavo-days implies 0.8% instead of 8%, which is inside the 2×-seed guard and
+would therefore be accepted and written over a correct seed; and starting the window at a
+same-day anchor is a zero-day window with nothing to divide by, which is what made "snap
+first, then report" — the natural order, since you are looking at the app — learn nothing.
+`ledger.foldFrom` is the single implementation of that window, shared with `balanceOf`, for
+the same reason `accrue` owns centavo-days: a second copy fits its own error as rate signal.
+
+A **corrected** credit re-runs the learner over the same period, so fixing the row fixes the
+rate rather than leaving it on the wrong lesson until the next report overwrites it.
 
 Accounts live in rows too, so opening one is a chat command rather than a deploy — the
 closed set handed to the extractor is `SELECT id FROM accounts WHERE active`, read at

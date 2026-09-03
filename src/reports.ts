@@ -6,14 +6,17 @@
  * the reading, and splitting them would put the learner two files from the number it learns.
  */
 
-import { Db, type Account } from './db.ts';
+import { Db, type Account, type Write } from './db.ts';
+import { resolveDate } from './extract.ts';
 import {
   accrue,
   addDays,
   balanceOf,
   brokenTransfers,
+  dayDiff,
   effective,
   flowsByDate,
+  foldFrom,
   learnRate,
   parseAmount,
   parseRate,
@@ -21,7 +24,7 @@ import {
   spendByCategory,
   sum,
   unsettled,
-  windowFor,
+  type Event,
 } from './ledger.ts';
 import { acct, nowIso, type Reply } from './reply.ts';
 import { mono } from './telegram.ts';
@@ -211,70 +214,60 @@ export async function rates(db: Db, accounts: Account[], arg: string): Promise<R
 }
 
 /**
- * `/interest maya 21.48` — report a credit you actually saw, and let the rate learn itself.
+ * Teach the rate from a credit that is already known to be real.
  *
- * This is the path that makes the seed stop mattering. Both tracked pots credit DAILY, so
- * you can report a real credit on day two and the seed is replaced permanently — including
- * when Maya changes the rate on you in March.
+ * Shared by REPORTING a credit and by CORRECTING one, because a corrected amount has to
+ * re-teach the rate over the same period — otherwise the row ends up right while the rate
+ * keeps the wrong lesson until some later report happens to overwrite it.
  *
- * Deterministic for the same reason as /snap and /rate: it feeds the number that scales
- * every future projection.
+ * The period is (last credit before `date`, date]. Reporting daily therefore learns from
+ * ONE day's balance, which is the whole point: the previous behaviour divided a single day's
+ * credit by every centavo-day since the anchor, so a ten-day-old anchor taught a rate a
+ * tenth of the truth — inside the 2x-seed guard, so it was accepted and written.
+ *
+ * The opening balance comes from the snapshot BEFORE `date`, never one dated on it: an
+ * anchor read on the day a credit posted already contains that credit, and using it leaves
+ * a zero-day window with nothing to divide by. That is what made "snap first, then report"
+ * — the natural order, since you are looking at the app — learn nothing at all.
  */
-export async function interest(db: Db, accounts: Account[], arg: string, today: string): Promise<Reply> {
-  const m = arg.trim().match(/^([a-z]+)\s+([\d,.]+)$/i);
-  if (!m) {
-    const earning = accounts.filter((a) => a.rate > 0).map((a) => a.id);
-    return {
-      text: `Report a credit you saw in the app: /interest ${earning[0] ?? 'maya'} 21.48\n\nEarning pots: ${earning.join(' / ') || 'none'}`,
-    };
-  }
-
-  const account = acct(accounts, m[1].toLowerCase());
-  if (!account) return { text: `Unknown account "${m[1]}".` };
-  const credited = parseAmount(m[2]);
-  if (credited == null || credited <= 0) return { text: `Couldn't read "${m[2]}" as an amount.` };
-
-  const anchor = await db.latestSnapshot(account.id);
-  const write = db.insertEvent({
-    type: 'interest',
-    book: account.book,
-    account_id: account.id,
-    amount_centavos: credited,
-    occurred_at: today,
-    logged_at: nowIso(),
-    note: 'reported credit',
-  } as never);
-
+export async function learnFromCredit(
+  db: Db,
+  account: Account,
+  credited: number,
+  date: string,
+): Promise<{ lines: string[]; writes: Write[] }> {
+  const anchor = await db.previousSnapshot(account.id, date);
   if (!anchor) {
-    await db.batch([write]);
+    const latest = await db.latestSnapshot(account.id);
     return {
-      text: `+${peso(credited)} interest · ${account.name}\n\nAnchor a balance with /snap to start learning the rate.`,
+      writes: [],
+      lines: [
+        latest
+          ? `nothing to learn yet — the anchor was read on ${latest.as_of_date}, which already includes this credit. Tomorrow's credit teaches the rate.`
+          : `anchor a balance first: /snap ${account.id} <amount> — then the next credit teaches the rate`,
+      ],
     };
   }
 
+  const rows = await db.eventsSince(account.id, anchor.as_of_date);
+  // Credits dated ON `date` must not close the period: the one being reported is dated
+  // there too, and a period cannot start and end on the same day.
+  const fold = foldFrom(anchor, rows, account.id, addDays(date, -1));
   // The learner's denominator is the accrual's OWN centavo-days. Two implementations of
   // centavo-days would fit the formula error as rate signal — which is the bug that
   // destroys a good seed permanently and leaves nothing to explain the gap.
-  const rows = await db.eventsSince(account.id, anchor.as_of_date);
-  const fold = accrue(
-    anchor.balance_centavos,
-    anchor.as_of_date,
-    addDays(today, -1),
-    flowsByDate(windowFor(rows, account.id, anchor.as_of_date, today)),
-    account,
-  );
+  const a = accrue(fold.opening, fold.start, date, flowsByDate(fold.after), account);
 
   const seen = (await db.observationCount(account.id))?.n ?? 0;
-  const learned = learnRate(credited, fold.centavoDays, account.rate_seed || account.rate, seen + 1);
+  const learned = learnRate(credited, a.centavoDays, account.rate_seed || account.rate, seen + 1);
 
-  const writes = [
-    write,
+  const writes: Write[] = [
     db.recordObservation({
       account_id: account.id,
-      period_start: anchor.as_of_date,
-      period_end: today,
+      period_start: fold.start,
+      period_end: date,
       credited_centavos: credited,
-      centavo_days: fold.centavoDays,
+      centavo_days: a.centavoDays,
       implied_rate: learned.implied,
       accepted: learned.accepted,
       reason: learned.reason,
@@ -282,20 +275,134 @@ export async function interest(db: Db, accounts: Account[], arg: string, today: 
     }),
   ];
   if (learned.accepted) writes.push(db.setRate(account.id, learned.rate, 'observed'));
-  await db.batch(writes);
 
-  const lines = [`+${peso(credited)} interest · ${account.name} · ${fold.days}d since ${anchor.as_of_date}`];
+  const lines = [`${a.days}d since ${fold.start}`];
   if (learned.accepted) {
     lines.push(
       `rate learned: ${(learned.rate * 100).toFixed(2)}% net (was ${(account.rate * 100).toFixed(2)}%)`,
     );
+    // A big drop has exactly two readings and NOTHING in the data separates them, so both
+    // are said. No lower guard: a lapsed Maya boost really does drop 8% to the 2.4% floor,
+    // and rejecting that would freeze the rate at a number the bank stopped paying.
     if (learned.rate < account.rate * 0.5)
-      lines.push('that looks like a lapsed boost, not an error — check your qualifying spend');
+      lines.push(
+        a.days > 1
+          ? `big drop — either the boost lapsed (check your qualifying spend) or that credit covers less than the ${a.days} days since ${fold.start}. If it was one day's worth, /undo and report each day.`
+          : 'that looks like a lapsed boost, not an error — check your qualifying spend',
+      );
   } else {
     // Keeping the good seed and saying why beats writing an authoritative wrong number
     // that nothing will ever pull back.
     lines.push(`kept ${(account.rate * 100).toFixed(2)}% — ${learned.reason}`);
     if (learned.implied > 0) lines.push(`(this credit implies ${(learned.implied * 100).toFixed(2)}%)`);
   }
-  return { text: lines.join('\n') };
+  return { lines, writes };
+}
+
+/** A year of daily credits is 365 lines and Telegram stops at 4096 characters. */
+const CREDIT_LINES = 12;
+
+/**
+ * Every credit you have reported, per account, with subtotals and a total.
+ *
+ * Bare `/interest` used to print a usage hint and nothing else, which is the one thing you
+ * already knew. Reads through `effective()`, so a corrected credit is counted once at its
+ * corrected amount and a voided one is not counted at all.
+ */
+async function interestList(db: Db): Promise<string> {
+  const rows = effective(await db.allEvents()).filter((r) => r.type === 'interest');
+  if (!rows.length)
+    return ['No interest reported yet.', 'Report one you saw in the app:  /interest maya 21.48'].join('\n');
+
+  const byAccount = new Map<string, Event[]>();
+  for (const r of rows) {
+    const g = byAccount.get(r.account_id);
+    if (g) g.push(r);
+    else byAccount.set(r.account_id, [r]);
+  }
+
+  const out: string[] = [];
+  let total = 0;
+  for (const [id, credits] of byAccount) {
+    credits.sort((x, y) => dayDiff(y.occurred_at, x.occurred_at));
+    const subtotal = sum(credits);
+    total += subtotal;
+    out.push(id);
+    const shown = credits.slice(-CREDIT_LINES);
+    for (const c of shown) out.push(`  ${c.occurred_at}  ${peso(c.amount_centavos).padStart(11)}`);
+    if (credits.length > shown.length) out.push(`  +${credits.length - shown.length} earlier · /csv`);
+    out.push(`  ${'subtotal'.padEnd(12)}${peso(subtotal).padStart(11)}`, '');
+  }
+  out.push(`${'total'.padEnd(14)}${peso(total).padStart(11)}`);
+  return [mono(out.join('\n')), 'Report a credit:  /interest maya 21.48 [yesterday]'].join('\n');
+}
+
+/**
+ * `/interest` lists what you have earned. `/interest maya 21.48 [yesterday]` reports a
+ * credit you actually saw, and the rate learns from it.
+ *
+ * This is the path that makes the seed stop mattering. Both tracked pots credit DAILY, so
+ * you can report a real credit on day two and the seed is replaced permanently — including
+ * when Maya changes the rate on you in March.
+ *
+ * Deterministic for the same reason as /snap and /rate: it feeds the number that scales
+ * every future projection. The date is optional and accepts "yesterday" or an ISO date, so
+ * catching up on three days is three messages rather than three lies about when they landed.
+ */
+export async function interest(db: Db, accounts: Account[], arg: string, today: string): Promise<Reply> {
+  const trimmed = arg.trim();
+  if (!trimmed) return { text: await interestList(db) };
+
+  // The date group is greedy so an unreadable hint ("last monday") reaches resolveDate and
+  // is REFUSED by name, instead of failing the match and printing a usage line that does
+  // not mention the thing that was wrong.
+  const m = trimmed.match(/^([a-z]+)\s+([\d,.]+)(?:\s+(.+))?$/i);
+  if (!m) {
+    const earning = accounts.filter((a) => a.rate > 0).map((a) => a.id);
+    return {
+      text: `Report a credit you saw in the app: /interest ${earning[0] ?? 'maya'} 21.48 [yesterday]\n\nEarning pots: ${earning.join(' / ') || 'none'}`,
+    };
+  }
+
+  const account = acct(accounts, m[1].toLowerCase());
+  if (!account) return { text: `Unknown account "${m[1]}".` };
+  const credited = parseAmount(m[2]);
+  if (credited == null || credited <= 0) return { text: `Couldn't read "${m[2]}" as an amount.` };
+  const date = resolveDate(m[3] ?? null, today, addDays);
+  if (date == null)
+    return { text: `Couldn't read "${m[3]}" as a date. Use 2026-09-02, "yesterday" or "3 days ago".` };
+  if (dayDiff(date, today) < 0) return { text: `${date} has not happened yet.` };
+
+  const write = db.insertEvent({
+    type: 'interest',
+    book: account.book,
+    account_id: account.id,
+    amount_centavos: credited,
+    occurred_at: date,
+    logged_at: nowIso(),
+    note: 'reported credit',
+  } as never);
+
+  // Learn BEFORE the row exists: it must not sit inside its own denominator.
+  const learned = await learnFromCredit(db, account, credited, date);
+  await db.batch([write, ...learned.writes]);
+
+  const out = [
+    `+${peso(credited)} interest · ${account.name}${date === today ? '' : ` · ${date}`}`,
+    ...learned.lines,
+  ];
+
+  // A /snap on this date already absorbed this credit as positive drift, so reporting it
+  // now counts the money twice. Cheap to say here, expensive to discover a month later.
+  const drifted = await db.one<{ amount_centavos: number }>(
+    `SELECT amount_centavos FROM events WHERE account_id = ? AND occurred_at = ? AND type = 'adjustment'
+       AND amount_centavos > 0 AND voided_at IS NULL ORDER BY id DESC LIMIT 1`,
+    [account.id, date],
+  );
+  if (drifted)
+    out.push(
+      '',
+      `heads up: anchoring on ${date} left +${peso(drifted.amount_centavos)} of drift, which may already BE this credit. If so, /undo this one.`,
+    );
+  return { text: out.join('\n') };
 }

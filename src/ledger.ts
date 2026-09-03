@@ -239,6 +239,53 @@ export function accrue(
   return { interest, balance, centavoDays, days };
 }
 
+/**
+ * Where the accrual must start, and what the balance was at that moment.
+ *
+ * Generated interest and REPORTED interest must never both count for the same day, so the
+ * fold begins at whichever is later: the anchor, or the last credit actually reported. One
+ * expression handles both "I never log credits" and "I logged one on the 3rd", with no set
+ * of covered days to maintain.
+ *
+ * `creditsUpto` bounds which credits are allowed to close the period. A balance wants every
+ * credit ever reported ('9999-12-31'); the rate learner wants only credits strictly BEFORE
+ * the one being reported, or the period would start and end on the same day and there would
+ * be nothing to divide by.
+ *
+ * Extracted so there is exactly ONE of these. Two implementations of the fold window is the
+ * same bug class as two implementations of centavo-days: the second one fits its own error
+ * as rate signal and quietly destroys a correct seed.
+ */
+export interface Fold {
+  start: string; // the day the accrual opens on; `opening` is the balance at its close
+  opening: number;
+  after: Event[]; // effective rows strictly after `start`
+}
+
+export function foldFrom(
+  anchor: { as_of_date: string; balance_centavos: number },
+  rows: Event[],
+  accountId: string,
+  creditsUpto: string,
+): Fold {
+  // Open-ended above the anchor, deliberately NOT capped at today: a same-day expense books
+  // forward to anchor+1, and capping here would hide what you just logged until tomorrow.
+  const rowsIn = windowFor(rows, accountId, anchor.as_of_date, '9999-12-31');
+  const credits = rowsIn.filter(
+    (r) => (r.type === 'interest' || r.type === 'cashback') && dayDiff(r.occurred_at, creditsUpto) >= 0,
+  );
+  const start = credits.reduce(
+    (a, r) => (dayDiff(a, r.occurred_at) > 0 ? r.occurred_at : a),
+    anchor.as_of_date,
+  );
+  return {
+    start,
+    // rowsIn is strictly above the anchor, so this is the flows in (anchor, start].
+    opening: anchor.balance_centavos + sum(rowsIn.filter((r) => dayDiff(r.occurred_at, start) >= 0)),
+    after: rowsIn.filter((r) => dayDiff(start, r.occurred_at) > 0),
+  };
+}
+
 /** Flows keyed by Manila date, excluding interest and cashback (the accrual generates those). */
 export function flowsByDate(rows: Event[]): Map<string, number> {
   const m = new Map<string, number>();
@@ -299,34 +346,16 @@ export function balanceOf(
   }
 
   const yesterday = addDays(today, -1);
-  // Open-ended above the anchor, deliberately NOT capped at today. A same-day expense books
-  // forward to anchor+1, and capping here would hide what you just logged until tomorrow —
-  // visible in /recap but missing from /balance, which reads as the bot losing your entry.
-  // Nothing legitimately sits in the future beyond that, and drift keeps its own explicit
-  // (prev, next] window, so reconciliation is unaffected.
-  const rowsIn = windowFor(rows, account.id, anchor.as_of_date, '9999-12-31');
+  // Every credit ever reported closes a period here — a balance must not re-generate
+  // interest for a day the bank already paid.
+  const fold = foldFrom(anchor, rows, account.id, '9999-12-31');
+  const folded = accrue(fold.opening, fold.start, yesterday, flowsByDate(fold.after), account);
 
-  // Generated interest and observed interest must never both count for the same day.
-  // Fold forward from whichever is later: the anchor, or the last credit actually reported.
-  // One expression handles both "I never log credits" and "I logged one on the 3rd",
-  // without tracking a set of covered days.
-  const credits = rowsIn.filter((r) => r.type === 'interest' || r.type === 'cashback');
-  const foldStart = credits.reduce(
-    (a, r) => (dayDiff(a, r.occurred_at) > 0 ? r.occurred_at : a),
-    anchor.as_of_date,
-  );
-  const upTo = (d: string) =>
-    sum(rowsIn.filter((r) => dayDiff(r.occurred_at, foldStart) >= 0 && r.occurred_at <= d));
-
-  const openingAtFold = anchor.balance_centavos + upTo(foldStart);
-  const after = rowsIn.filter((r) => dayDiff(foldStart, r.occurred_at) > 0);
-  const folded = accrue(openingAtFold, foldStart, yesterday, flowsByDate(after), account);
-
-  // accrue() applies flows dated foldStart+1 .. yesterday, so everything the fold did not
+  // accrue() applies flows dated fold.start+1 .. yesterday, so everything the fold did not
   // reach has to be added here. That is today's rows AND anything booked forward — a
   // same-day expense lands on anchor+1, which can be tomorrow. Matching `=== today` would
   // drop exactly the row you just logged.
-  const beyondFold = sum(after.filter((r) => dayDiff(yesterday, r.occurred_at) > 0));
+  const beyondFold = sum(fold.after.filter((r) => dayDiff(yesterday, r.occurred_at) > 0));
   const confirmed = folded.balance + beyondFold;
   const accrued = dailyInterest(confirmed, account); // today's slice, credited tomorrow
 

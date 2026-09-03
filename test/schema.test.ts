@@ -18,6 +18,7 @@ import { readFileSync } from 'node:fs';
 
 import { Db } from '../src/db.ts';
 import { anchorAccount, applyEvent, balances, callback, runCommand } from '../src/handlers.ts';
+import type { Extracted } from '../src/extract.ts';
 
 const SCHEMA = readFileSync(new URL('../schema.sql', import.meta.url), 'utf8');
 
@@ -487,4 +488,154 @@ test('a later anchor does not ask again', async () => {
   const second = await anchorAccount(db, cash, 140_000, '2026-09-03');
   assert.doesNotMatch(second.text, /already logged/);
   assert.match(second.text, /drift/, 'it reports drift instead');
+});
+
+// ── reported credits, and the period they are divided by ────────────────────
+
+/** Every Extracted field, so a test only states the ones it is about. */
+const spokenEvent = (p: Partial<Extracted>): Extracted => ({
+  intent: 'unknown',
+  amount: null,
+  account: null,
+  to_account: null,
+  category: null,
+  merchant: null,
+  note: null,
+  date_hint: null,
+  shared_amount: null,
+  recurrence: 'one_off',
+  fee: null,
+  query_kind: null,
+  match_amount: null,
+  match_merchant: null,
+  looks_like_transfer: false,
+  new_account: null,
+  reply: null,
+  ...p,
+});
+
+interface Obs {
+  period_start: string;
+  period_end: string;
+  centavo_days: number;
+  credited_centavos: number;
+  implied_rate: number;
+  accepted: number;
+}
+const observations = (db: Db) =>
+  db.all<Obs>(
+    'SELECT period_start, period_end, centavo_days, credited_centavos, implied_rate, accepted FROM rate_observations ORDER BY id',
+  );
+const rateOf = async (db: Db, id: string) =>
+  (await db.one<{ rate: number }>('SELECT rate FROM accounts WHERE id = ?', [id]))!.rate;
+
+test('a credit is divided by ITS OWN period, not by everything since the anchor', async () => {
+  // The bug this pins down: the period used to run from the last ANCHOR, so reporting one
+  // day's ₱21.48 against a ten-day-old anchor implied 0.8% instead of 8% — inside the
+  // 2x-seed guard, so it was accepted and written over a correct seed. Reporting daily is
+  // the habit the design wants, and it was the input that destroyed the rate.
+  const db = await fresh();
+  const accounts = await db.accounts();
+  await runCommand(db, accounts, '/snap maya 98000', '2026-09-01');
+
+  // ₱98,000 at 8% net = round(9_800_000 * 0.08 / 365) = 2148 centavos a day.
+  await runCommand(db, accounts, '/interest maya 21.48 2026-09-02', '2026-09-02');
+  await runCommand(db, accounts, '/interest maya 21.48 2026-09-03', '2026-09-03');
+
+  const obs = await observations(db);
+  assert.equal(obs.length, 2);
+
+  // First: (anchor, first credit] — one day, so the denominator is the anchor balance itself.
+  assert.deepEqual(
+    [obs[0].period_start, obs[0].period_end, obs[0].centavo_days],
+    ['2026-09-01', '2026-09-02', 9_800_000],
+  );
+  assert.equal(obs[0].accepted, 0, 'one observation can be a partial period — two are required');
+
+  // Second: the period starts at the PREVIOUS CREDIT, not the anchor. Under the old rule
+  // this would have been 2 days of centavo-days and implied ~4%.
+  assert.equal(obs[1].period_start, '2026-09-02');
+  assert.equal(obs[1].centavo_days, 9_802_148, 'the balance at the close of the previous credit day');
+  assert.equal(obs[1].accepted, 1);
+  assert.ok(Math.abs(obs[1].implied_rate - 0.08) < 0.0005, `implied ${obs[1].implied_rate}, wanted ~0.08`);
+  assert.ok(Math.abs((await rateOf(db, 'maya')) - 0.08) < 0.0005, 'the learned rate recovers the truth');
+});
+
+test('anchoring before reporting the credit no longer costs the lesson', async () => {
+  // You read the app, so you /snap first — and that anchor is dated the same day as the
+  // credit you are about to report. Dividing by a window that starts on that anchor is a
+  // zero-day window, which used to answer "balance too small to infer a rate" and learn
+  // nothing. The opening balance comes from the snapshot BEFORE the credit date instead.
+  const db = await fresh();
+  const accounts = await db.accounts();
+  await runCommand(db, accounts, '/snap maya 98000', '2026-09-01');
+  await runCommand(db, accounts, '/interest maya 21.48 2026-09-02', '2026-09-02');
+
+  // Anchor at the derived figure so there is no drift to confuse the check.
+  await runCommand(db, accounts, '/snap maya 98021.48', '2026-09-03');
+  const reply = await runCommand(db, accounts, '/interest maya 21.48', '2026-09-03');
+
+  assert.doesNotMatch(reply!.text, /too small/);
+  const obs = await observations(db);
+  assert.equal(obs.at(-1)!.period_start, '2026-09-02', 'the same period either way round');
+  assert.equal(obs.at(-1)!.centavo_days, 9_802_148);
+});
+
+test('correcting a credit re-teaches the rate, not just the row', async () => {
+  // Without this the row ends up right while the rate keeps the lesson it learned from the
+  // wrong number — so "fix the interest and the maths follows" would only be half true.
+  const db = await fresh();
+  const accounts = await db.accounts();
+  await runCommand(db, accounts, '/snap maya 98000', '2026-09-01');
+  await runCommand(db, accounts, '/interest maya 21.48 2026-09-02', '2026-09-02');
+  await runCommand(db, accounts, '/interest maya 21.48 2026-09-03', '2026-09-03');
+  const before = await rateOf(db, 'maya');
+
+  const inboxId = (await db.claim({ update_id: 1, has_photo: false, now: '2026-09-03T00:00:00Z' }))!;
+  const fixed = await applyEvent(
+    db,
+    accounts,
+    spokenEvent({ intent: 'correction', account: 'maya', match_amount: '21.48', amount: '25.00' }),
+    { inboxId, today: '2026-09-03', hadPhoto: false },
+  );
+  assert.match(fixed.text, /₱25\.00/);
+
+  const obs = await observations(db);
+  assert.equal(obs.at(-1)!.credited_centavos, 2500, 'the corrected amount is what got divided');
+  assert.equal(obs.at(-1)!.period_start, '2026-09-02', "over the corrected row's own period");
+  assert.notEqual(await rateOf(db, 'maya'), before);
+
+  // And the ledger counts the credit once, at the corrected figure.
+  const list = await runCommand(db, accounts, '/interest', '2026-09-03');
+  assert.match(list!.text, /46\.48/, 'the 21.48 that stands plus the corrected 25.00');
+});
+
+test('/interest with no arguments lists what you have earned, per account and in total', async () => {
+  const db = await fresh();
+  const accounts = await db.accounts();
+  assert.match((await runCommand(db, accounts, '/interest', '2026-09-03'))!.text, /No interest reported yet/);
+
+  await runCommand(db, accounts, '/snap maya 98000', '2026-09-01');
+  await runCommand(db, accounts, '/snap maribank 50000', '2026-09-01');
+  await runCommand(db, accounts, '/interest maya 21.48 2026-09-02', '2026-09-02');
+  await runCommand(db, accounts, '/interest maribank 3.56 2026-09-02', '2026-09-02');
+
+  const list = (await runCommand(db, accounts, '/interest', '2026-09-03'))!.text;
+  assert.match(list, /maya/);
+  assert.match(list, /maribank/);
+  assert.match(list, /total\s+₱25\.04/);
+});
+
+test('a date that cannot be read is refused by name, never filed under today', async () => {
+  const db = await fresh();
+  const accounts = await db.accounts();
+  assert.match(
+    (await runCommand(db, accounts, '/interest maya 21.48 last monday', '2026-09-03'))!.text,
+    /Couldn't read "last monday" as a date/,
+  );
+  assert.match(
+    (await runCommand(db, accounts, '/interest maya 21.48 2026-09-10', '2026-09-03'))!.text,
+    /has not happened yet/,
+  );
+  assert.equal(await db.one('SELECT 1 FROM events'), null, 'and nothing was written');
 });

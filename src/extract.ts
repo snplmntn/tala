@@ -31,7 +31,15 @@ export const MODEL = 'qwen/qwen3.8-27b'; // text AND vision, strict schema, own 
 const ENDPOINT = 'https://api.groq.com/openai/v1/chat/completions';
 
 export type Intent =
-  'expense' | 'income' | 'transfer' | 'query' | 'correction' | 'snapshot' | 'open_account' | 'unknown';
+  | 'expense'
+  | 'income'
+  | 'transfer'
+  | 'interest'
+  | 'query'
+  | 'correction'
+  | 'snapshot'
+  | 'open_account'
+  | 'unknown';
 
 export interface Extracted {
   intent: Intent;
@@ -45,7 +53,7 @@ export interface Extracted {
   shared_amount: string | null;
   recurrence: 'one_off' | 'monthly' | 'annual';
   fee: string | null;
-  query_kind: 'balance' | 'recap' | 'owed' | 'csv' | null;
+  query_kind: 'balance' | 'recap' | 'owed' | 'csv' | 'interest' | null;
   match_amount: string | null;
   match_merchant: string | null;
   looks_like_transfer: boolean;
@@ -137,6 +145,7 @@ function schema(accountIds: string[]) {
                 'expense',
                 'income',
                 'transfer',
+                'interest',
                 'query',
                 'correction',
                 'snapshot',
@@ -145,6 +154,7 @@ function schema(accountIds: string[]) {
               ],
               description:
                 "expense = money left an account. income = money arrived. transfer = moved between two of the user's OWN accounts. " +
+                'interest = a bank CREDITED interest or earnings on the user\'s own savings ("maya credited 21.48", "got 8 pesos interest"). ' +
                 'correction = fixing a PAST entry ("the X was 285 not 250", "that was gcash not maya"). ' +
                 'query = asking a question, not recording anything ("how much do I have", "recap"). ' +
                 'snapshot = REPORTING a current bank balance read from an app ("maya is at 98000", "my maribank shows 12850"). ' +
@@ -190,8 +200,10 @@ function schema(accountIds: string[]) {
             },
             query_kind: {
               type: ['string', 'null'],
-              enum: ['balance', 'recap', 'owed', 'csv', null],
-              description: 'ONLY for intent=query. Null for every other intent.',
+              enum: ['balance', 'recap', 'owed', 'csv', 'interest', null],
+              description:
+                'ONLY for intent=query. Null for every other intent. Use "interest" when they ask what they have EARNED so far ' +
+                '("how much interest have I made", "total earnings") — that is a question, not a credit being reported.',
             },
             match_amount: {
               ...nullableString,
@@ -256,7 +268,8 @@ CHOOSING THE INTENT — this is the part that matters most:
 - Recording a purchase -> expense. Receiving money -> income.
 - Moving money between two of the user's OWN accounts -> transfer, with account = source and to_account = destination. A fee the user mentions goes in the "fee" field, NOT in "category".
 - FIXING SOMETHING ALREADY LOGGED -> correction. Phrases like "the jollibee was 285 not 250", "that was 300", "it was gcash not maya", "wrong amount". Put the OLD amount in match_amount and the merchant in match_merchant so the row can be found, and the NEW amount in amount. Never return an expense for a correction — that would record the purchase twice.
-- ASKING A QUESTION, recording nothing -> query, with query_kind set. "how much do I have" / "what's my balance" -> balance. "recap" / "how much did I spend" -> recap. "who owes me" -> owed. "export" -> csv.
+- A BANK CREDITING INTEREST or earnings on their own savings -> interest, with account, amount and date_hint. "maya credited 21.48", "got 8 pesos interest on maribank", "maribank paid 15 yesterday", "earned 21.48 today". This is NOT income: income is money arriving from outside, interest is a pot paying the user, and the projected rate LEARNS from it. If they do not say which account, return account: null and it will be asked.
+- ASKING A QUESTION, recording nothing -> query, with query_kind set. "how much do I have" / "what's my balance" -> balance. "recap" / "how much did I spend" -> recap. "who owes me" -> owed. "export" -> csv. "how much interest have I earned" / "total earnings" -> interest.
 - ASKING TO TRACK AN ACCOUNT OR CARD THAT IS NOT IN THE LIST -> open_account, with "new_account" filled in. "open a beep card account", "add seabank", "start tracking my BPI". Never answer that you cannot open one, and never file it under an existing account that merely sounds close.
   - id: what they called it, lowercased, letters and digits only, no spaces ("beep card" -> beepcard, "BPI" -> bpi).
   - book: personal unless they say it is for the business. kind: bank for a bank, ewallet for a GCash/Maya-style wallet or a stored-value card, cash for physical money, credit for a credit card or loan.
@@ -332,14 +345,19 @@ export async function extract(
 /**
  * Resolve a relative date hint against today, in Manila civil dates.
  *
- * Deliberately narrow: it handles what people actually type and returns null otherwise,
- * so an unparseable hint means "today" rather than a hallucinated date in the wrong month.
+ * Deliberately narrow: it handles what people actually type and returns NULL otherwise,
+ * rather than a hallucinated date in the wrong month.
+ *
+ * Null, not `today`, because the two callers need opposite things from an unreadable hint.
+ * An LLM date_hint falls back to today (`?? today` at the call site) — a rejected expense
+ * is worse than a mis-dated one. A hint the user TYPED is refused by name, because silently
+ * filing "last monday" under today is the kind of wrong you never find out about.
  */
 export function resolveDate(
   hint: string | null,
   today: string,
   addDays: (d: string, n: number) => string,
-): string {
+): string | null {
   if (!hint) return today;
   const h = hint.trim().toLowerCase();
   if (h === 'today') return today;
@@ -347,5 +365,5 @@ export function resolveDate(
   const ago = h.match(/^(\d+)\s*days?\s*ago$/);
   if (ago) return addDays(today, -Number(ago[1]));
   if (/^\d{4}-\d{2}-\d{2}$/.test(h)) return h;
-  return today;
+  return null;
 }

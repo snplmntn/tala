@@ -372,11 +372,20 @@ export class Db {
 
   // ── rate learning ─────────────────────────────────────────────────────────
 
+  /**
+   * EVERY observation, accepted or not — which is what learnRate's "need a second
+   * observation" guard actually means: one period can be partial, so a rate is not trusted
+   * until a second reading agrees with it.
+   *
+   * Counting only the ACCEPTED ones made that guard unsatisfiable: the first observation is
+   * rejected for being first, so the accepted count stayed at zero, so every later one was
+   * also "the first". The learner could never accept anything, and `/interest` was reporting
+   * "need a second observation" forever while (est) never cleared.
+   */
   observationCount(accountId: string): Promise<{ n: number } | null> {
-    return this.one<{ n: number }>(
-      'SELECT COUNT(*) AS n FROM rate_observations WHERE account_id = ? AND accepted = 1',
-      [accountId],
-    );
+    return this.one<{ n: number }>('SELECT COUNT(*) AS n FROM rate_observations WHERE account_id = ?', [
+      accountId,
+    ]);
   }
 
   recordObservation(o: {

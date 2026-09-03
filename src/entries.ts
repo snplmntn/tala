@@ -12,6 +12,7 @@ import { Db, type Account } from './db.ts';
 import { CATEGORIES, resolveDate, type Extracted } from './extract.ts';
 import { addDays, bookingDate, lateEntryPair, parseAmount, peso, type Event } from './ledger.ts';
 import { acct, nowIso, rowKeys, type Reply } from './reply.ts';
+import { learnFromCredit } from './reports.ts';
 
 export async function money(
   db: Db,
@@ -41,7 +42,9 @@ export async function money(
   const finalAmount = isRefund ? Math.abs(amount) : signed;
 
   const anchor = await db.latestSnapshot(account.id);
-  const occurred = resolveDate(e.date_hint, ctx.today, addDays);
+  // `?? today` on purpose: a rejected expense is worse than a mis-dated one, and the note
+  // keeps whatever the model actually read.
+  const occurred = resolveDate(e.date_hint, ctx.today, addDays) ?? ctx.today;
   const { date, lateFor } = bookingDate(occurred, anchor?.as_of_date ?? null);
 
   const base = {
@@ -105,7 +108,7 @@ export async function transfer(
 
   const tid = `t${Date.now().toString(36)}`;
   const fee = parseAmount(e.fee);
-  const occurred = resolveDate(e.date_hint, ctx.today, addDays);
+  const occurred = resolveDate(e.date_hint, ctx.today, addDays) ?? ctx.today;
   const common = { inbox_id: ctx.inboxId, occurred_at: occurred, logged_at: nowIso(), transfer_id: tid };
 
   const writes = [
@@ -177,6 +180,16 @@ export async function correct(
   const account = acct(accounts, e.account) ?? acct(accounts, target.account_id)!;
   const signed = target.amount_centavos < 0 ? -Math.abs(newAmount) : Math.abs(newAmount);
 
+  // A corrected CREDIT has to re-teach the rate over the same period. Without this the row
+  // ends up right while the rate keeps the lesson it learned from the wrong number, until
+  // some later report happens to overwrite it — so "fix the interest and the maths follows"
+  // would only be half true. Read before the supersede is written, so the corrected row
+  // cannot land inside its own denominator; the amount is passed in explicitly.
+  const relearn =
+    target.type === 'interest' && target.amount_centavos !== signed
+      ? await learnFromCredit(db, account, Math.abs(signed), target.occurred_at)
+      : null;
+
   // A FULL SUPERSEDE carrying the complete corrected payload, dated as the ORIGINAL so the
   // expense stays in its own month. Absolute, never a delta: a replayed correction is then
   // a no-op instead of silently turning 285 into 320.
@@ -196,6 +209,7 @@ export async function correct(
       logged_at: nowIso(),
       corrects_id: target.corrects_id ?? target.id,
     } as never),
+    ...(relearn?.writes ?? []),
   ]);
 
   // Echo what was matched. Seeing the wrong row NAMED is the entire disambiguation, and it
@@ -207,7 +221,7 @@ export async function correct(
   ]
     .filter(Boolean)
     .join(', ');
-  return { text: `${label} → ${peso(Math.abs(signed))}` };
+  return { text: [`${label} → ${peso(Math.abs(signed))}`, ...(relearn?.lines ?? [])].join('\n') };
 }
 
 // ── undo ────────────────────────────────────────────────────────────────────
