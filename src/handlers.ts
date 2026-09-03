@@ -50,14 +50,7 @@ export async function applyEvent(
       return interest(db, accounts, [e.account, e.amount, e.date_hint].filter(Boolean).join(' '), ctx.today);
     }
     case 'open_account':
-      // Straight to the command, arguments and all: /account add already owns the id rules,
-      // the duplicate check and the credit-sign warning, and a second copy of that here is
-      // how the two would drift. The extractor's job is only to write the arguments.
-      // ponytail: created outright, no confirm button — /account off reverses it, and an
-      // account with no rows costs nothing. Gate it if typos start opening accounts.
-      return e.new_account
-        ? accountsCmd(db, `add ${e.new_account}`)
-        : { text: 'What should I call it? Like "open a seabank account".' };
+      return proposeAccount(db, e.new_account, e.new_account_book);
     case 'query': {
       // The extractor already classified this, so honour it. A query is read-only: there is
       // no correctness argument for making you remember a slash command to ask a question.
@@ -115,6 +108,13 @@ export async function callback(db: Db, data: string, today: string): Promise<Cal
     // The whole reply, keyboard included: a first anchor answers with another question.
     return anchorAccount(db, account, Number(b), today);
   }
+  if (kind === 'open') {
+    // Straight into the command: /account add owns the id rules, the duplicate check and the
+    // credit-sign warning, so the tapped path and the typed path cannot answer differently.
+    const [book, id, name] = (b ?? '').split('|');
+    return accountsCmd(db, `add ${id} ${book} ${a} ${name ?? ''}`.trim());
+  }
+
   if (kind === 'anchored')
     return { text: 'Kept as counted — the earlier spending stays in your recap only.' };
 
@@ -284,6 +284,53 @@ export async function runCommand(
     default:
       return { text: `Unknown command /${cmd}. Try /help` };
   }
+}
+
+/**
+ * An id is DERIVED from the name, never asked for and never taken from the model.
+ *
+ * The model used to be asked for a whole `/account add` argument line; it reliably sent back
+ * the name alone, and the user got the command's usage string — the terminal friction this
+ * path exists to remove. Names are the only thing a person actually says out loud, so that
+ * is the only thing asked of the model, and the id is a pure function of it.
+ */
+export const accountId = (name: string): string =>
+  name
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '')
+    .slice(0, 16);
+
+/**
+ * Opening an account, proposed rather than performed.
+ *
+ * The kind is the one field nobody can infer: a Beep card is a stored-value card, which is
+ * an ewallet to one person and cash to another, and the choice changes nothing less than
+ * whether the balance is an asset or a debt. So it is asked with buttons — four taps of
+ * ground truth beats a confident guess you would have to close the account to undo.
+ */
+export async function proposeAccount(db: Db, name: string | null, book: string | null): Promise<Reply> {
+  const clean = (name ?? '').replace(/[:|]/g, ' ').trim().slice(0, 24);
+  const id = accountId(clean);
+  if (!/^[a-z][a-z0-9]{1,15}$/.test(id))
+    return { text: 'What should I call it? Like "open a seabank account".' };
+
+  const existing = (await db.allAccounts()).find((a) => a.id === id);
+  if (existing)
+    return {
+      text: existing.active
+        ? `${existing.name} is already open — just log to it.`
+        : `${existing.name} is closed. /account on ${id} reopens it, history and all.`,
+    };
+
+  const bk = book === 'business' ? 'business' : 'personal';
+  const payload = `${bk}|${id}|${clean}`;
+  return {
+    text: `Open ${clean} as a ${bk} account — what kind is it?`,
+    keyboard: [
+      KINDS.map((k) => ({ text: k, callback_data: `open:${k}:${payload}` })),
+      [{ text: '✗ cancel', callback_data: 'nope' }],
+    ],
+  };
 }
 
 const BOOKS = ['personal', 'business'] as const;

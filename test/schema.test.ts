@@ -212,45 +212,39 @@ test('a new account joins the extractor enum with no redeploy', async () => {
   assert.equal(row.active, 1);
 });
 
-test('an account can be opened by talking, not only by a slash command', async () => {
-  // The extractor's account field is a closed enum, so before this existed the only way to
-  // add to that enum was /account add — and the bot answered "I can't open an account".
-  // The event carries the command's own argument string so the validation is not duplicated.
+test('an account is opened by talking, and only the kind is asked', async () => {
+  // The extractor's account field is a closed enum, so the only way in used to be
+  // /account add — and the bot answered "I can't open an account for you".
   const db = await fresh();
-  const spoken = (new_account: string | null) =>
-    applyEvent(
-      db,
-      [],
-      {
-        intent: 'open_account',
-        new_account,
-        amount: null,
-        account: null,
-        to_account: null,
-        category: null,
-        merchant: null,
-        note: null,
-        date_hint: null,
-        shared_amount: null,
-        recurrence: 'one_off',
-        fee: null,
-        query_kind: null,
-        match_amount: null,
-        match_merchant: null,
-        looks_like_transfer: false,
-        reply: null,
-      },
-      { inboxId: 1, today: '2026-09-03', hadPhoto: false },
-    );
+  const spoken = (name: string | null, book: 'personal' | 'business' | null = null) =>
+    applyEvent(db, [], spokenEvent({ intent: 'open_account', new_account: name, new_account_book: book }), {
+      inboxId: 1,
+      today: '2026-09-03',
+      hadPhoto: false,
+    });
 
-  const opened = await spoken('beepcard personal ewallet Beep Card');
-  assert.match(opened.text, /Beep Card added/);
+  // A name is all the model is asked for: the id is derived, the kind is a tap.
+  const ask = await spoken('Beep Card');
+  assert.match(ask.text, /Open Beep Card as a personal account/);
+  assert.equal((await db.accountIds()).includes('beepcard'), false, 'asking must not write');
+  const kinds = ask.keyboard![0].map((b) => b.text);
+  assert.deepEqual(kinds, ['bank', 'ewallet', 'cash', 'credit']);
+
+  const created = await callback(db, ask.keyboard![0][1].callback_data, '2026-09-03');
+  assert.match(created.text, /Beep Card added/);
   assert.equal((await db.accountIds()).includes('beepcard'), true, 'usable on the very next message');
+  const [row] = await db.all<{ name: string; book: string; kind: string }>(
+    "SELECT name, book, kind FROM accounts WHERE id = 'beepcard'",
+  );
+  assert.deepEqual(row, { name: 'Beep Card', book: 'personal', kind: 'ewallet' });
 
-  // The id rules still bite, because it is the same code path as the slash command.
-  assert.match((await spoken('beep-card personal ewallet')).text, /won't work as an id/);
-  assert.match((await spoken('beepcard personal ewallet')).text, /already exists/);
+  assert.match((await spoken('Beep Card')).text, /already open/, 'never asks twice');
+  await db.batch([db.setAccountActive('beepcard', false)]);
+  assert.match((await spoken('beep card')).text, /closed/, 'a closed one is reopened, not duplicated');
+
+  assert.match((await spoken('Kita', 'business')).text, /as a business account/);
   assert.match((await spoken(null)).text, /What should I call it/);
+  assert.match((await spoken('!!')).text, /What should I call it/, 'an id must survive the name');
 });
 
 test('closing an account hides it from the enum but keeps its history', async () => {
@@ -302,6 +296,7 @@ test('a natural-language anchor writes nothing until confirmed', async () => {
     match_merchant: null,
     looks_like_transfer: false,
     new_account: null,
+    new_account_book: null,
     reply: null,
   };
 
@@ -367,6 +362,7 @@ test('a spoken question is answered, not redirected to a slash command', async (
       match_merchant: null,
       looks_like_transfer: false,
       new_account: null,
+      new_account_book: null,
       reply: null,
     },
     { inboxId: 1, today: '2026-09-03', hadPhoto: false },
@@ -510,6 +506,7 @@ const spokenEvent = (p: Partial<Extracted>): Extracted => ({
   match_merchant: null,
   looks_like_transfer: false,
   new_account: null,
+  new_account_book: null,
   reply: null,
   ...p,
 });

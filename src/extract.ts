@@ -57,8 +57,9 @@ export interface Extracted {
   match_amount: string | null;
   match_merchant: string | null;
   looks_like_transfer: boolean;
-  /** Only for intent: open_account — the `/account add` arguments, validated by the command itself. */
+  /** Only for intent: open_account — the display name as written. The id is derived; the kind is asked. */
   new_account: string | null;
+  new_account_book: 'personal' | 'business' | null;
   /** Only for intent: unknown — the words to say back. Every other intent is answered by code. */
   reply: string | null;
 }
@@ -136,6 +137,7 @@ function schema(accountIds: string[]) {
             'match_merchant',
             'looks_like_transfer',
             'new_account',
+            'new_account_book',
             'reply',
           ],
           properties: {
@@ -221,9 +223,14 @@ function schema(accountIds: string[]) {
             new_account: {
               ...nullableString,
               description:
-                'ONLY for intent=open_account: the new account as "<id> <personal|business> <bank|ewallet|cash|credit> [display name]", ' +
-                'e.g. "beepcard personal ewallet Beep Card". The id is lowercase letters and digits only, 2-16 chars, no spaces. ' +
-                'Null for every other intent.',
+                "ONLY for intent=open_account: the account's name, exactly as the user wrote it and nothing else — " +
+                '"Beep Card", "SeaBank", "BPI". Not an id, no book or kind words, no amount. Null for every other intent.',
+            },
+            new_account_book: {
+              type: ['string', 'null'],
+              enum: ['personal', 'business', null],
+              description:
+                'ONLY for intent=open_account: business ONLY if the user says it is for the business. Otherwise personal.',
             },
             reply: {
               ...nullableString,
@@ -270,11 +277,11 @@ CHOOSING THE INTENT — this is the part that matters most:
 - FIXING SOMETHING ALREADY LOGGED -> correction. Phrases like "the jollibee was 285 not 250", "that was 300", "it was gcash not maya", "wrong amount". Put the OLD amount in match_amount and the merchant in match_merchant so the row can be found, and the NEW amount in amount. Never return an expense for a correction — that would record the purchase twice.
 - A BANK CREDITING INTEREST or earnings on their own savings -> interest, with account, amount and date_hint. "maya credited 21.48", "got 8 pesos interest on maribank", "maribank paid 15 yesterday", "earned 21.48 today". This is NOT income: income is money arriving from outside, interest is a pot paying the user, and the projected rate LEARNS from it. If they do not say which account, return account: null and it will be asked.
 - ASKING A QUESTION, recording nothing -> query, with query_kind set. "how much do I have" / "what's my balance" -> balance. "recap" / "how much did I spend" -> recap. "who owes me" -> owed. "export" -> csv. "how much interest have I earned" / "total earnings" -> interest.
-- ASKING TO TRACK AN ACCOUNT OR CARD THAT IS NOT IN THE LIST -> open_account, with "new_account" filled in. "open a beep card account", "add seabank", "start tracking my BPI". Never answer that you cannot open one, and never file it under an existing account that merely sounds close.
-  - id: what they called it, lowercased, letters and digits only, no spaces ("beep card" -> beepcard, "BPI" -> bpi).
-  - book: personal unless they say it is for the business. kind: bank for a bank, ewallet for a GCash/Maya-style wallet or a stored-value card, cash for physical money, credit for a credit card or loan.
-  - display name: how they wrote it, e.g. "Beep Card".
-  - If the SAME message also states a balance, still return ONLY open_account. The account has to exist before a balance can be anchored to it, and the reply says how.
+- ASKING TO TRACK AN ACCOUNT OR CARD THAT IS NOT IN THE LIST -> open_account. "open a beep card account", "add seabank", "start tracking my BPI", "add my beep card". Never answer that you cannot open one, and never file it under an existing account that merely sounds close.
+  - new_account is the NAME ONLY, as they wrote it: "Beep Card", "SeaBank", "BPI". Never an id, never the word bank/ewallet/cash/credit, never an amount.
+  - new_account_book is business only if they say so, otherwise personal.
+  - Whether it is a bank, wallet, cash or credit is NOT yours to decide — the app asks with buttons. Do not put it anywhere.
+  - If the SAME message also states a balance, still return ONLY open_account, and leave the amount out of the name. The account must exist before a balance can attach to it.
 - REPORTING A BALANCE they just read in their banking app -> snapshot, with account and amount. "maya is at 98000", "maribank shows 12,850", "my gcash balance is 340". This is NOT income and NOT an expense: it is a statement of what an account currently holds.
 - Use unknown when nothing above fits, and then always write "reply". Do not fall back to unknown for a question or a balance report.
 

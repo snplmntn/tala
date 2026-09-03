@@ -101,10 +101,15 @@ account paid — no receipt on earth says which card was used.
 
 ### Opening an account
 
-Tell it in words — _"open a beep card account"_, _"start tracking my BPI"_ — and it creates one,
-guessing personal/business and bank/ewallet/cash/credit from how you said it. It comes back
-untracked and un-anchored, so follow with `/snap beepcard 21` to give it a balance. Wrong guess:
-`/account off beepcard` closes it and the history stays.
+Tell it in words — _"open a beep card account"_, _"start tracking my BPI"_ — and it asks the one
+thing it cannot infer:
+
+> Open Beep Card as a personal account — what kind is it?
+> `bank` `ewallet` `cash` `credit`
+
+One tap and it exists, with the id derived from the name (`beepcard`). It starts untracked and
+un-anchored, so follow with `/snap beepcard 21` to give it a balance and `/rate beepcard 4% gross`
+if it earns. `/account off beepcard` closes it again and keeps the history.
 
 ### What it will refuse to guess
 
