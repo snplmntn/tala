@@ -14,12 +14,14 @@ import {
   addDays,
   balanceOf,
   type Balance,
+  bookingDate,
   brokenTransfers,
   dayDiff,
   effective,
   flowsByDate,
   foldFrom,
   lastDayOfMonth,
+  lateEntryPair,
   learnRate,
   monthOf,
   parseAmount,
@@ -392,10 +394,12 @@ export async function rates(db: Db, accounts: Account[], arg: string): Promise<R
  * credit by every centavo-day since the anchor, so a ten-day-old anchor taught a rate a
  * tenth of the truth — inside the 2x-seed guard, so it was accepted and written.
  *
- * The opening balance comes from the snapshot BEFORE `date`, never one dated on it: an
- * anchor read on the day a credit posted already contains that credit, and using it leaves
- * a zero-day window with nothing to divide by. That is what made "snap first, then report"
- * — the natural order, since you are looking at the app — learn nothing at all.
+ * The opening balance comes from the snapshot BEFORE `date`, never one dated on it: a
+ * period cannot start and end on the same day, so an anchor dated on the credit leaves a
+ * zero-day window with nothing to divide by. That is a reason to LEARN nothing, and it is
+ * not a reason to drop the credit: whether the anchor already contains it depends on the
+ * clock time it was read at, which no date column records. The row books via bookingDate
+ * either way and the balance keeps it.
  */
 export async function learnFromCredit(
   db: Db,
@@ -410,7 +414,7 @@ export async function learnFromCredit(
       writes: [],
       lines: [
         latest
-          ? `nothing to learn yet: the anchor was read on ${latest.as_of_date}, which already includes this credit. Tomorrow's credit teaches the rate.`
+          ? `nothing to learn yet: ${latest.as_of_date} is the only anchor, so there is no earlier reading to measure the period from. The next credit after your next /snap teaches the rate.`
           : `anchor a balance first: /snap ${account.id} <amount>, then the next credit teaches the rate`,
       ],
     };
@@ -540,22 +544,37 @@ export async function interest(db: Db, accounts: Account[], arg: string, today: 
     return { text: `Couldn't read "${m[3]}" as a date. Use 2026-09-02, "yesterday" or "3 days ago".` };
   if (dayDiff(date, today) < 0) return { text: `${date} has not happened yet.` };
 
-  const write = db.insertEvent({
+  // The SAME booking rule every other money row goes through, and for the same reason: the
+  // reconciliation window is (anchor, next], so a row dated ON the anchor day falls outside
+  // every window and is silently invisible. This path used to write `occurred_at` raw, which
+  // is how two real Maya credits reported on the anchor date vanished from the balance while
+  // sitting in `events` looking fine. bookingDate is the one place that rule lives.
+  //
+  // The LEARNER still gets the true date below: where a credit books is a reconciliation
+  // question, when it was earned is a rate question, and they are not the same date.
+  const anchor = await db.latestSnapshot(account.id);
+  const { date: booked, lateFor } = bookingDate(date, anchor?.as_of_date ?? null);
+
+  const base = {
     type: 'interest',
     book: account.book,
     account_id: account.id,
     amount_centavos: credited,
-    occurred_at: date,
+    occurred_at: booked,
     logged_at: nowIso(),
     note: 'reported credit',
-  } as never);
+  };
+  // Strictly before the anchor the money IS already in the anchor, so it books as a pair
+  // that nets to zero: interest-earned gains the credit, the balance does not move twice.
+  const rows = lateFor ? lateEntryPair(base, lateFor) : [base];
 
   // Learn BEFORE the row exists: it must not sit inside its own denominator.
   const learned = await learnFromCredit(db, account, credited, date);
-  await db.batch([write, ...learned.writes]);
+  await db.batch([...rows.map((r) => db.insertEvent(r as never)), ...learned.writes]);
 
   const out = [
     `+${peso(credited)} interest · ${account.name}${date === today ? '' : ` · ${date}`}`,
+    ...(lateFor ? [`late entry for ${lateFor}, balance unchanged`] : []),
     ...learned.lines,
   ];
 

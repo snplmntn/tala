@@ -863,6 +863,39 @@ test('an empty day is simply empty', async () => {
   assert.match(quiet, /spent\s+₱0\.00/);
 });
 
+test('a credit reported on the anchor day reaches the balance, once', async () => {
+  // The bug this exists to stop: /interest wrote occurred_at raw while every other money row
+  // went through bookingDate. Anchor Maya at 01:37, the bank credits at 06:42, report it that
+  // evening, and the row landed outside the (anchor, next] window - sitting in `events`
+  // looking correct while every balance ignored it, permanently. Anchoring BEFORE the bank
+  // pays is the ordinary case, and no date column can tell it from anchoring after.
+  const db = await fresh();
+  const accounts = await db.accounts();
+  await anchorAccount(
+    db,
+    accounts.find((a) => a.id === 'maya')!,
+    10_294_025,
+    '2026-09-03',
+  );
+
+  const reply = await runCommand(db, accounts, '/interest maya 15.34', '2026-09-03');
+  assert.match(reply!.text, /₱102,955\.59 left in Maya Savings/, 'the credit must move the balance');
+
+  const [row] = await db.all<{ occurred_at: string }>(
+    "SELECT occurred_at FROM events WHERE type = 'interest'",
+  );
+  assert.equal(row.occurred_at, '2026-09-04', 'booked past the anchor, not onto it');
+
+  // Still there tomorrow: the window it used to fall through is the same one a later `today`
+  // re-derives, so a balance that is right on the day and wrong after is the real failure.
+  const next = await balances(db, accounts, '2026-09-04');
+  assert.match(next, /₱102,955\.59/);
+
+  // And it is counted ONCE: the credit closes the accrual period rather than adding on top
+  // of interest the projector generates for a day the bank has already paid.
+  assert.equal((next.match(/102,955\.59/g) ?? []).length, 1);
+});
+
 test('the void button kills the whole late-entry pair, so the balance it protects does not move', async () => {
   // A late entry books as a PAIR that nets to zero: the categorised spend, plus an offset,
   // because the anchor already contains that money. The button voided one row by id, which
