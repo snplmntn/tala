@@ -10,7 +10,7 @@
 import { Db, type Account } from './db.ts';
 import type { Extracted } from './extract.ts';
 import { dayDiff, drift, effective, parseAmount, peso, sum } from './ledger.ts';
-import { acct, nowIso, type Reply } from './reply.ts';
+import { acct, noAccount, nowIso, type Reply } from './reply.ts';
 
 /**
  * An anchor asked for in prose is PROPOSED, never written.
@@ -37,7 +37,7 @@ export async function proposeAnchor(
     return { text: `Which account, and what balance? e.g. "maya is at 98,000" or /snap maya 98000` };
   if (!account)
     return { text: `${peso(balance!)} in which account? (${accounts.map((a) => a.id).join(' / ')})` };
-  if (balance == null) return { text: `${account.name} — what balance does the app show?` };
+  if (balance == null) return { text: `${account.name}: what balance does the app show?` };
 
   const prev = await db.latestSnapshot(account.id);
   const was = prev ? ` (was ${peso(prev.balance_centavos)} on ${prev.as_of_date})` : '';
@@ -75,8 +75,7 @@ export async function snapshot(db: Db, accounts: Account[], text: string, today:
   }
 
   const account = acct(accounts, m[1].toLowerCase());
-  if (!account)
-    return { text: `Unknown account "${m[1]}". One of: ${accounts.map((a) => a.id).join(' / ')}` };
+  if (!account) return { text: noAccount(m[1], accounts) };
   const balance = parseAmount(m[2]);
   if (balance == null) return { text: `Couldn't read "${m[2]}" as an amount.` };
 
@@ -124,7 +123,7 @@ export async function anchorAccount(
       );
       lines.push(`drift ${peso(gap)} over ${dayDiff(prev.as_of_date, today)} days`);
     } else {
-      lines.push('drift ₱0.00 — everything logged');
+      lines.push('drift ₱0.00, everything logged');
     }
     // Snapshot and adjustment land together, or neither does.
     await db.batch(writes);
@@ -172,10 +171,10 @@ export async function anchorAccount(
       return {
         text: lines.join('\n'),
         keyboard: [
-          [{ text: `✓ ${peso(balance)} is what's there now`, callback_data: `anchored:${account.id}` }],
+          [{ text: "✓ that's the balance now", callback_data: `anchored:${account.id}` }],
           [
             {
-              text: `↓ subtract the ${peso(Math.abs(prior))}`,
+              text: `↓ subtract ${peso(Math.abs(prior))}`,
               callback_data: `anchorsub:${account.id}:${prior}`,
             },
           ],

@@ -6,7 +6,7 @@ _Talâ_ is Tagalog for a recorded entry, and also the evening star.
 
 ```
 you  250 jollibee maribank
-bot  ₱250.00 · jollibee · Maribank · food          [✏️ fix] [🗑 void] [✓ ok]
+bot  ₱250.00 · jollibee · Maribank · food          [✏️ fix] [🗑 void] [✓ confirm]
 
 you  /balance
 bot  personal
@@ -302,7 +302,7 @@ src/extract.ts      the only place the LLM lives. one fetch, strict JSON schema
 src/telegram.ts     transport. the bot token never leaves this file
 src/handlers.ts     typed events in, rows out — plus COMMANDS, the one command table
                     that drives /help, Telegram's "/" menu, and both dispatchers
-src/index.ts        long-poll loop, Manila-midnight scheduler, /healthz
+src/index.ts        long-poll loop, 08:00 Manila scheduler, /healthz
 scripts/chat.ts     terminal REPL against a local SQLite file — the fast dev loop
 scripts/backup.ts   portable SQL dump — the backup and the exit from Turso
 test/ledger.test.ts the identity, and the only thing that can falsify it

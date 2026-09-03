@@ -131,9 +131,22 @@ the jollibee was 285 not 250
 that was gcash not maya
 ```
 
-Or use the buttons under any row: **✏️ fix**, **🗑 void**, **✓ ok**.
+Or use the buttons under any row: **✏️ fix**, **🗑 void**, **✓ confirm**.
 
-`/undo` voids the last thing you logged.
+**✓ confirm** answers with what is left in that account, which is the reason to tap it: the
+echo above still has live buttons, so its figure is provisional until you settle the entry.
+Anything you never tap confirms itself at 08:00 the next morning, and the daily line says how
+many it closed.
+
+**🗑 void** removes every row the entry wrote, not just one. A late entry is a pair and a
+transfer is two legs plus a fee, so voiding half of either would move a balance that is
+supposed to stay still.
+
+`/undo` voids the last thing you logged, the same way.
+
+Every reply that moved money ends with what is left in the account it moved. An account you
+have never anchored has no balance to state, only a running total from an unknown starting
+point, so it asks you to anchor it instead of inventing a figure.
 
 Nothing is ever deleted or overwritten. A correction writes a new row that supersedes the old
 one, and the database physically refuses an UPDATE or a DELETE on a money row. What you see
@@ -206,7 +219,12 @@ personal
 
 ## The daily line
 
-Every midnight, Manila time, Tala sends you the day's balances unprompted.
+Every morning at 08:00, Manila time, Tala sends you the day's balances unprompted, and opens
+with how many untapped entries it confirmed overnight.
+
+It used to arrive at midnight, which is a notification you sleep through and read at
+breakfast anyway. Now it arrives when you read it. It is also why the overnight close-out is
+at 08:00 rather than midnight: an entry logged at 23:50 gets a night, not ten minutes.
 
 This is not a notification, it is the error-detection loop. Without it, a wrong account or a
 missing transfer leg stays invisible until month end — by which point you cannot remember the
@@ -215,7 +233,7 @@ transactions well enough to say what went wrong. Seeing it the next morning, you
 **It is also the dead-man switch.** A daily message that stops arriving _is_ the alarm that
 something is down. Nothing else monitors it, on purpose.
 
-If the service was down when midnight passed, the line arrives late and says so
+If the service was down when 08:00 passed, the line arrives late and says so
 (`late, no daily line for 2d`) rather than being skipped — and anything that came due in
 those days comes with it. The catch-up window is a month; older than that is history, not a
 nudge.
@@ -246,7 +264,7 @@ reminder set for the 31st still arrives on 28 February — month-end is the dead
 actually set reminders for, and silently skipping five months a year would land on the one
 that mattered most.
 
-They arrive with the daily line, so they land just after midnight in Manila. If a deadline is
+They arrive with the daily line, so they land at 08:00 in Manila. If a deadline is
 the last day of the month, set the reminder a few days earlier — arriving on the deadline is
 arriving on your last chance.
 

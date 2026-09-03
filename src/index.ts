@@ -1,5 +1,5 @@
 /**
- * Tala. One process: a Telegram long-poll loop, a Manila-midnight daily line, and a bare
+ * Tala. One process: a Telegram long-poll loop, an 08:00 Manila daily line, and a bare
  * health endpoint for the keep-alive ping that stops Render's free tier spinning down.
  *
  * Deliberately NOT a webhook. Render needs a public endpoint anyway for the ping, and this
@@ -12,7 +12,7 @@
 import { createServer } from 'node:http';
 import { Db } from './db.ts';
 import { extract, transcript } from './extract.ts';
-import { addDays, dayDiff, daysBetween, manilaDate } from './ledger.ts';
+import { addDays, dayDiff, daysBetween, manilaDate, manilaHour, manilaStartOfDay } from './ledger.ts';
 import { COMMANDS, applyEvent, balances, callback, dropFired, dueReminders, runCommand } from './handlers.ts';
 import {
   answerCallback,
@@ -126,10 +126,14 @@ async function handle(u: Update): Promise<boolean> {
     // and the chat gets the answer. Telegram caps it at 200 characters and silently fails
     // the whole call above that, which is how a multi-line anchor result became no result.
     await answerCallback(TOKEN, q.id, r.text.split('\n')[0].slice(0, 200));
-    if (r.advice || !q.message) return false;
+    if (!q.message) return false;
     // The question has been answered: its buttons stop existing, and the outcome is posted
     // as a message so the chat holds a record of it rather than a prompt that never resolved.
-    await clearKeyboard(TOKEN, q.message.chat.id, q.message.message_id);
+    //
+    // ADVICE keeps the buttons and nothing else. It used to skip the send as well, which is
+    // why tapping "fix" only ever flashed a toast: the guidance it exists to give was gone
+    // in a second, and the row it was about still needed its void and confirm taps.
+    if (!r.advice) await clearKeyboard(TOKEN, q.message.chat.id, q.message.message_id);
     await send(TOKEN, q.message.chat.id, r.text, r.keyboard);
     history.add('assistant', r.text);
     return false;
@@ -141,7 +145,7 @@ async function handle(u: Update): Promise<boolean> {
   // A `document` ships original bytes with home and campus GPS intact. Telegram re-encodes
   // `photo`, which is what strips EXIF, so only photos are accepted.
   if (m.document) {
-    await send(TOKEN, m.chat.id, 'Send receipts as a photo, not a file — a file keeps its GPS metadata.');
+    await send(TOKEN, m.chat.id, 'Send receipts as a photo, not a file: a file keeps its GPS metadata.');
     return false;
   }
 
@@ -195,7 +199,7 @@ async function handle(u: Update): Promise<boolean> {
     await send(
       TOKEN,
       m.chat.id,
-      `Saved your message but couldn't read it yet (${String(e).slice(0, 80)}). It will be retried — nothing is lost.`,
+      `Saved your message but couldn't read it yet (${String(e).slice(0, 80)}). It will be retried, nothing is lost.`,
     );
     return true; // the call was made and the quota spent, so the drain still paces
   }
@@ -231,6 +235,16 @@ async function handle(u: Update): Promise<boolean> {
 /** A month of catch-up is plenty; anything older is history, not a nudge. */
 const CATCHUP_DAYS = 31;
 
+/**
+ * 08:00 Manila, and it carries the overnight close-out.
+ *
+ * It fired at midnight, which is a notification you sleep through and read at breakfast
+ * anyway. At 08:00 it arrives when you read it, and confirming yesterday's untapped entries
+ * on the same tick gives you one morning message instead of two: what it closed, then where
+ * you stand.
+ */
+const DAILY_HOUR = 8;
+
 async function dailyLine(since: string | null, t: string): Promise<void> {
   const accounts = await db.accounts();
   const name = await db.getSetting('owner_name');
@@ -243,7 +257,7 @@ async function dailyLine(since: string | null, t: string): Promise<void> {
     }),
   );
   const stalest = Math.max(...ages);
-  const nudge = stalest >= 28 ? `\n\nAnchors are ${stalest}d old — time to /snap.` : '';
+  const nudge = stalest >= 28 ? `\n\nAnchors are ${stalest}d old, time to /snap.` : '';
 
   // Every day the process missed, so a reminder that came due during an outage still fires
   // — late, and SAYING it is late. A silent catch-up would erase the evidence of the
@@ -253,7 +267,15 @@ async function dailyLine(since: string | null, t: string): Promise<void> {
   const bell = due.length ? `\n\n${due.map((r) => `⏰ ${r.text}`).join('\n')}` : '';
   const late = dates.length > 1 ? ` · late, no daily line for ${dates.length - 1}d` : '';
 
-  await send(TOKEN, OWNER, `${name ? `${name} — ` : ''}${t}${late}\n${body}${nudge}${bell}`);
+  // Close out everything you did not tap. An entry is taken as read once you have slept on
+  // it, which is the whole reason this line fires at 08:00 rather than at midnight: a spend
+  // logged at 23:50 would otherwise have had ten minutes.
+  const cutoff = manilaStartOfDay(t);
+  const closing = await db.unconfirmedBefore(cutoff);
+  if (closing) await db.batch([db.confirmBefore(cutoff, new Date().toISOString())]);
+  const closed = closing ? `\n${closing} ${closing === 1 ? 'entry' : 'entries'} confirmed` : '';
+
+  await send(TOKEN, OWNER, `${name ? `${name} · ` : ''}${t}${late}${closed}\n${body}${nudge}${bell}`);
   // Both AFTER the send, and in this order: a Telegram failure must not consume a one-off
   // reminder, and must leave the marker unset so the next tick tries again.
   await dropFired(db, due);
@@ -299,12 +321,12 @@ async function retryDeferred(): Promise<void> {
 }
 
 /**
- * Manila midnight, computed rather than configured.
+ * 08:00 Manila, computed rather than configured.
  *
- * A cron expression would have to be UTC (`0 16 * * *`) and would silently be wrong if the
- * offset ever changed. Checking the Manila civil date every minute is smaller than that and
- * cannot drift — and it survives the process restarting at any hour, because the marker is
- * the date itself, not a timer.
+ * A cron expression would have to be UTC (`0 0 * * *`) and would silently be wrong if the
+ * offset ever changed. Checking the Manila civil date and hour every minute is smaller than
+ * that and cannot drift, and it survives the process restarting at any hour, because the
+ * marker is the date itself, not a timer.
  *
  * TWO markers, and both are load-bearing. The stored one is what makes a missed day recover:
  * this used to initialise from `today()` on boot, so a process that was down all of the 25th
@@ -324,7 +346,11 @@ function scheduler(): void {
       try {
         const t = today();
         const last = ran === t ? t : await db.getSetting('last_daily_line');
-        if (last !== t) {
+        // The hour is the only reason this is not a pure date comparison. A process that
+        // boots at 03:00 waits for 08:00; one that boots at 14:00 with the day unsent fires
+        // at once, because a late daily line still carries reminders that would otherwise
+        // just be gone.
+        if (last !== t && manilaHour(new Date()) >= DAILY_HOUR) {
           ran = t; // set BEFORE the send, so a throw cannot retry it every minute
           await dailyLine(last, t);
         }
@@ -429,7 +455,7 @@ function health(): void {
 }
 
 if (PAIRING) {
-  log('PAIRING MODE — OWNER_CHAT_ID is 0, so nothing will be recorded.');
+  log('PAIRING MODE: OWNER_CHAT_ID is 0, so nothing will be recorded.');
   log('Message the bot; it will reply with your chat id. Set it, then restart.');
 }
 

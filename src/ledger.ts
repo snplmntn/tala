@@ -70,7 +70,28 @@ export function manilaDate(at: Date): string {
   return MANILA.format(at);
 }
 
-/** Shift a YYYY-MM-DD civil date by whole days. No timezone involved — pure calendar. */
+const MANILA_HOUR = new Intl.DateTimeFormat('en-GB', {
+  timeZone: 'Asia/Manila',
+  hour: '2-digit',
+  hourCycle: 'h23',
+});
+
+/** The Manila hour, 0-23. The daily line is the only boundary that is not a whole date. */
+export function manilaHour(at: Date): number {
+  return Number(MANILA_HOUR.format(at));
+}
+
+/**
+ * The instant a Manila civil date began, as a UTC ISO string.
+ *
+ * `logged_at` is stored in UTC, so this is what turns "logged before today" into a
+ * comparison SQL can actually do. Written as a literal offset because the Philippines has
+ * had no DST and no offset change since 1978: Intl would return the same instant, and a
+ * literal keeps this a pure string operation with nothing to configure.
+ */
+export const manilaStartOfDay = (date: string): string => new Date(`${date}T00:00:00+08:00`).toISOString();
+
+/** Shift a YYYY-MM-DD civil date by whole days. No timezone involved, pure calendar. */
 export function addDays(date: string, n: number): string {
   const [y, m, d] = date.split('-').map(Number);
   const t = Date.UTC(y, m - 1, d) + n * 86_400_000;
@@ -357,9 +378,10 @@ export interface Balance {
 }
 
 /**
- * Pending rows ALWAYS count. Status is presentational and the 24h settle changes no
- * arithmetic — which deletes the filtering that would otherwise make an Aug 31 23:00
- * expense appear in the August recap on Sep 2 but not on Sep 1.
+ * Pending rows ALWAYS count. `confirmed_at` is presentational and changes no arithmetic,
+ * which deletes the filtering that would otherwise make an Aug 31 23:00 expense appear in
+ * the August recap on Sep 2 but not on Sep 1. Confirmation is a review marker: you tap it,
+ * or the 08:00 daily line sets it for everything logged before today.
  */
 export function balanceOf(
   account: {

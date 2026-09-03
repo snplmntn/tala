@@ -17,6 +17,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 import { Db } from '../src/db.ts';
+import { manilaStartOfDay } from '../src/ledger.ts';
 import {
   anchorAccount,
   applyEvent,
@@ -334,7 +335,7 @@ test('a natural-language anchor writes nothing until confirmed', async () => {
   assert.equal(rows[0].balance_centavos, 9_800_000);
 
   // Cancelling writes nothing either.
-  assert.match((await callback(db, 'nope', '2026-09-03')).text, /Cancelled/);
+  assert.match((await callback(db, 'nope', '2026-09-03')).text, /cancelled/);
 });
 
 test('a spoken question is answered, not redirected to a slash command', async () => {
@@ -474,7 +475,9 @@ test('the first anchor asks whether the count was before or after logged spendin
 
   // Counted-before: an explicit adjustment applies it. The anchor itself is never rewritten,
   // so the ledger records why the balance differs from the figure that was typed.
-  assert.match((await callback(db, 'anchorsub:cash:-25000', '2026-09-03')).text, /balance is now ₱1,250\.00/);
+  // Also a cross-check on remaining(): the figure now comes from balanceFor(), and it has
+  // to agree with the anchor-plus-adjustment arithmetic this assertion was written against.
+  assert.match((await callback(db, 'anchorsub:cash:-25000', '2026-09-03')).text, /₱1,250\.00 left/);
   assert.match(await balances(db, accounts, '2026-09-03'), /Cash on hand\s+₱1,250\.00/);
 
   const [anchor] = await db.all<{ balance_centavos: number }>(
@@ -832,4 +835,107 @@ test('an empty day distinguishes "nothing spent" from "the anchor already has it
   await runCommand(db, accounts, '/snap maribank 50000', '2026-09-04');
   const anchored = (await runCommand(db, accounts, '/recap', '2026-09-04'))!.text;
   assert.match(anchored, /books to the next day/, 'never let it read as a lost entry');
+});
+
+test('the void button kills the whole late-entry pair, so the balance it protects does not move', async () => {
+  // A late entry books as a PAIR that nets to zero: the categorised spend, plus an offset,
+  // because the anchor already contains that money. The button voided one row by id, which
+  // left the offset behind and moved the balance by ₱250 that the pair exists to hold still.
+  // /undo always voided siblings; both now take the one path.
+  const db = await fresh();
+  const accounts = await db.accounts();
+  const maribank = accounts.find((a) => a.id === 'maribank')!;
+  await anchorAccount(db, maribank, 1_285_697, '2026-09-03');
+
+  const inboxId = (await db.claim({ update_id: 1, has_photo: false, now: '2026-09-03T00:00:00Z' }))!;
+  const reply = await applyEvent(
+    db,
+    accounts,
+    spokenEvent({ intent: 'expense', amount: '250', account: 'maribank', date_hint: '2026-08-28' }),
+    { inboxId, today: '2026-09-03', hadPhoto: false },
+  );
+  assert.match(reply.text, /late entry for 2026-08-28/);
+  const before = await balances(db, accounts, '2026-09-03');
+
+  const id = Number(reply.keyboard![0][1].callback_data.split(':')[1]);
+  const tap = await callback(db, `void:${id}`, '2026-09-03');
+  assert.match(tap.text, /\+1 paired/, 'both rows, or the balance moves');
+  assert.match(tap.text, /₱12,856\.97 left in Maribank/, 'a void says where it left you');
+
+  const live = await db.one<{ n: number }>('SELECT COUNT(*) AS n FROM events WHERE voided_at IS NULL');
+  assert.equal(live?.n, 0, 'half a voided pair is worse than either whole state');
+  assert.equal(await balances(db, accounts, '2026-09-03'), before, 'the pair nets to zero, voided or not');
+});
+
+test('a transfer books per leg, so the anchor day does not swallow it', async () => {
+  // The reconciliation window is (anchor, next] and EXCLUSIVE, so a leg dated on its own
+  // account's anchor day falls outside every window and moves nothing. money() has always
+  // booked a same-day flow forward for exactly this reason. transfer() wrote the raw date,
+  // so ₱2,000 left no trace anywhere until the next anchor reported it as drift.
+  const db = await fresh();
+  const accounts = await db.accounts();
+  await anchorAccount(
+    db,
+    accounts.find((a) => a.id === 'maya')!,
+    9_856_416,
+    '2026-09-03',
+  );
+  await anchorAccount(
+    db,
+    accounts.find((a) => a.id === 'gotyme')!,
+    8_500_000,
+    '2026-09-03',
+  );
+
+  const move = (dateHint: string | null, update: number) =>
+    db.claim({ update_id: update, has_photo: false, now: '2026-09-03T02:00:00Z' }).then((inboxId) =>
+      applyEvent(
+        db,
+        accounts,
+        spokenEvent({
+          intent: 'transfer',
+          amount: '2000',
+          account: 'maya',
+          to_account: 'gotyme',
+          date_hint: dateHint,
+        }),
+        { inboxId: inboxId!, today: '2026-09-03', hadPhoto: false },
+      ),
+    );
+
+  const sameDay = await move(null, 1);
+  assert.match(sameDay.text, /₱96,564\.16 left in Maya Savings, ₱87,000\.00 left in GoTyme/);
+
+  // Before the anchor is money BOTH anchors already contain, so it books as the same
+  // net-to-zero pair a late expense does: the record gains it, no balance moves.
+  const late = await move('2026-08-28', 2);
+  assert.match(late.text, /late entry for 2026-08-28, balance unchanged/);
+  assert.match(late.text, /₱96,564\.16 left in Maya Savings, ₱87,000\.00 left in GoTyme/);
+
+  // And it is still a well-formed transfer: the offsets are adjustments, so the pair of legs
+  // brokenTransfers() checks still nets to zero.
+  assert.doesNotMatch(await balances(db, accounts, '2026-09-03'), /broken transfer/);
+});
+
+test('the 08:00 close-out confirms what you slept on, and nothing from today', async () => {
+  // Keyed on logged_at against the Manila start of day, so an entry typed at 23:50 gets a
+  // night rather than the ten minutes a midnight close-out would have given it.
+  const db = await fresh();
+  const at = (loggedAt: string) =>
+    db.run(
+      `INSERT INTO events (type, book, account_id, amount_centavos, category, occurred_at, logged_at)
+       VALUES ('expense','personal','maribank',-25000,'food','2026-09-03',?)`,
+      [loggedAt],
+    );
+  await at('2026-09-03T15:50:00Z'); // 23:50 Manila on the 3rd
+  await at('2026-09-03T16:10:00Z'); // 00:10 Manila on the 4th, still yours to review
+  await at('2026-09-03T15:59:59Z'); // 23:59:59 Manila on the 3rd
+
+  const cutoff = manilaStartOfDay('2026-09-04');
+  assert.equal(await db.unconfirmedBefore(cutoff), 2, 'only what was logged before today');
+  await db.batch([db.confirmBefore(cutoff, '2026-09-04T00:00:00Z')]);
+
+  assert.equal(await db.unconfirmedBefore(cutoff), 0, 'and confirming twice is a no-op');
+  const open = await db.one<{ n: number }>('SELECT COUNT(*) AS n FROM events WHERE confirmed_at IS NULL');
+  assert.equal(open?.n, 1, "today's entry keeps its buttons until tomorrow");
 });

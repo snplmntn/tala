@@ -331,6 +331,29 @@ export class Db {
     return { sql: 'UPDATE events SET voided_at = ? WHERE id = ? AND voided_at IS NULL', args: [now, id] };
   }
 
+  /** How many rows the 08:00 close-out is about to confirm, for the daily line to report. */
+  async unconfirmedBefore(before: string): Promise<number> {
+    const row = await this.one<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM events
+        WHERE confirmed_at IS NULL AND voided_at IS NULL AND logged_at < ?`,
+      [before],
+    );
+    return row?.n ?? 0;
+  }
+
+  /**
+   * Confirm everything logged before an instant. Keyed on `logged_at`, never `occurred_at`:
+   * a late entry books forward to anchor+1 and can carry a FUTURE date, so keying on the
+   * booking date would confirm rows before you had a chance to see them.
+   */
+  confirmBefore(before: string, now: string): Write {
+    return {
+      sql: `UPDATE events SET confirmed_at = ?
+             WHERE confirmed_at IS NULL AND voided_at IS NULL AND logged_at < ?`,
+      args: [now, before],
+    };
+  }
+
   confirmEvent(id: number, now: string): Write {
     return {
       sql: 'UPDATE events SET confirmed_at = ? WHERE id = ? AND confirmed_at IS NULL',
@@ -338,6 +361,9 @@ export class Db {
     };
   }
 
+  // ponytail: NO CALLER. /owed reads settled_at through unsettled(), but nothing in the bot
+  // can set it, so a receivable is currently permanent. Wire this to a button on rows
+  // carrying a shared amount when settling one actually comes up.
   settle(id: number, now: string): Write {
     return { sql: 'UPDATE events SET settled_at = ? WHERE id = ? AND settled_at IS NULL', args: [now, id] };
   }

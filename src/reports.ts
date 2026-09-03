@@ -13,6 +13,7 @@ import {
   accrue,
   addDays,
   balanceOf,
+  type Balance,
   brokenTransfers,
   dayDiff,
   effective,
@@ -32,8 +33,62 @@ import {
   yours,
   type Event,
 } from './ledger.ts';
-import { acct, nowIso, type Reply } from './reply.ts';
+import { acct, noAccount, nowIso, type Reply } from './reply.ts';
 import { mono } from './telegram.ts';
+
+/**
+ * One account's balance, computed the single way /balance computes it.
+ *
+ * The balance table and every reply that reports what is left used to run this
+ * anchor-then-fold dance separately and happened to agree. One helper means they cannot
+ * quietly stop agreeing.
+ */
+export async function balanceFor(db: Db, account: Account, today: string): Promise<Balance> {
+  const anchor = await db.latestSnapshot(account.id);
+  const rows = await db.eventsSince(account.id, anchor?.as_of_date ?? '0000-00-00');
+  return balanceOf(account, anchor, rows, today);
+}
+
+/**
+ * What is left in an account, as one line: the closing statement on every reply that moved
+ * money. The question you have after spending is "how much is left", and answering it in
+ * the same breath is a round trip to /balance you no longer make.
+ *
+ * `confirmed` and not `expected`, because "left" is a question about what your banking app
+ * shows, and today's uncredited interest slice would make the two disagree by centavos for
+ * no gain.
+ *
+ * An UN-ANCHORED account has no balance to report, only a running total counted from an
+ * unknown starting point. Printing a figure there would invent one, so it asks for the
+ * anchor instead: the refusal balanceOf() already makes, said out loud.
+ */
+export async function remaining(db: Db, account: Account, today: string): Promise<string> {
+  const b = await balanceFor(db, account, today);
+  return b.anchorDate
+    ? `${peso(b.confirmed)} left in ${account.name}`
+    : `${account.name} not anchored, /snap ${account.id} <amount>`;
+}
+
+/**
+ * What is left in every account a set of rows touched, as one line.
+ *
+ * The closing line for a void or an undo, both of which can reach two accounts at once: a
+ * transfer's two legs share an inbox_id, so voiding one voids both, and reporting one side
+ * would answer half the question.
+ */
+export async function remainingFor(
+  db: Db,
+  accounts: Account[],
+  rows: Event[],
+  today: string,
+): Promise<string> {
+  const out: string[] = [];
+  for (const id of new Set(rows.map((r) => r.account_id))) {
+    const account = acct(accounts, id);
+    if (account) out.push(await remaining(db, account, today));
+  }
+  return out.join(', ');
+}
 
 export async function balances(db: Db, accounts: Account[], today: string): Promise<string> {
   const out: string[] = [];
@@ -49,11 +104,7 @@ export async function balances(db: Db, accounts: Account[], today: string): Prom
     const unanchored: string[] = [];
 
     for (const a of inBook) {
-      const anchor = await db.latestSnapshot(a.id);
-      const rows = anchor
-        ? await db.eventsSince(a.id, anchor.as_of_date)
-        : await db.eventsSince(a.id, '0000-00-00');
-      const b = balanceOf(a, anchor, rows, today);
+      const b = await balanceFor(db, a, today);
 
       if (!b.anchorDate) {
         // Never folded into the total. An unknown baseline plus a known outflow is not a
@@ -85,7 +136,7 @@ export async function balances(db: Db, accounts: Account[], today: string): Prom
     if (unanchored.length) {
       // Say what the total is missing, in the same breath as the total.
       out.push(
-        `  excludes ${unanchored.length} un-anchored: ${unanchored.join(', ')} — /snap ${unanchored[0]} <amount>`,
+        `  excludes ${unanchored.length} un-anchored: ${unanchored.join(', ')}. /snap ${unanchored[0]} <amount>`,
       );
     }
   }
@@ -221,7 +272,7 @@ export async function recap(db: Db, arg: string, today: string): Promise<string>
     // Separately these two mislead. Together they are the number that decides solvency.
     out.push(
       '',
-      `contributed ${peso(contributed)} to the business — buffer moving ${peso(income - spend - contributed)}`,
+      `contributed ${peso(contributed)} to the business, buffer moving ${peso(income - spend - contributed)}`,
     );
   }
   const owed = unsettled(rows);
@@ -236,7 +287,7 @@ export async function recap(db: Db, arg: string, today: string): Promise<string>
   if (w.from === w.to && !expenses.length) {
     const anchored = await db.one('SELECT 1 FROM snapshots WHERE as_of_date = ?', [w.from]);
     if (anchored)
-      return `${text}\nYou anchored on ${w.from}, so anything spent after that reading books to the next day — it shows in /recap ${addDays(w.from, 1)}.`;
+      return `${text}\nYou anchored on ${w.from}, so anything spent after that reading books to the next day. It shows in /recap ${addDays(w.from, 1)}.`;
   }
   return text;
 }
@@ -290,7 +341,7 @@ export async function rates(db: Db, accounts: Account[], arg: string): Promise<R
     });
     return {
       text: [
-        'Rates are stored NET — what actually lands in the account.',
+        'Rates are stored NET: what actually lands in the account.',
         mono(lines.join('\n')),
         'Set one:  /rate maya 10% gross   (or "8% net")',
         'Report a real credit and it learns instead:  /interest maya 21.48',
@@ -300,7 +351,7 @@ export async function rates(db: Db, accounts: Account[], arg: string): Promise<R
 
   const [id, value, basis] = parts;
   const account = acct(accounts, id?.toLowerCase() ?? null);
-  if (!account) return { text: `Unknown account "${id}". One of: ${accounts.map((a) => a.id).join(' / ')}` };
+  if (!account) return { text: noAccount(id, accounts) };
   if (!value)
     return {
       text: `${account.name} is at ${(account.rate * 100).toFixed(2)}% net. Set it: /rate ${account.id} 10% gross`,
@@ -311,7 +362,7 @@ export async function rates(db: Db, accounts: Account[], arg: string): Promise<R
     // word is a 25% error waiting to happen on every projection this pot ever makes.
     return {
       text: [
-        `Say gross or net — the banks advertise one and pay the other.`,
+        `Say gross or net: the banks advertise one and pay the other.`,
         `  /rate ${account.id} ${value} gross   ← the number on their website`,
         `  /rate ${account.id} ${value} net     ← what actually lands`,
       ].join('\n'),
@@ -357,8 +408,8 @@ export async function learnFromCredit(
       writes: [],
       lines: [
         latest
-          ? `nothing to learn yet — the anchor was read on ${latest.as_of_date}, which already includes this credit. Tomorrow's credit teaches the rate.`
-          : `anchor a balance first: /snap ${account.id} <amount> — then the next credit teaches the rate`,
+          ? `nothing to learn yet: the anchor was read on ${latest.as_of_date}, which already includes this credit. Tomorrow's credit teaches the rate.`
+          : `anchor a balance first: /snap ${account.id} <amount>, then the next credit teaches the rate`,
       ],
     };
   }
@@ -401,13 +452,13 @@ export async function learnFromCredit(
     if (learned.rate < account.rate * 0.5)
       lines.push(
         a.days > 1
-          ? `big drop — either the boost lapsed (check your qualifying spend) or that credit covers less than the ${a.days} days since ${fold.start}. If it was one day's worth, /undo and report each day.`
-          : 'that looks like a lapsed boost, not an error — check your qualifying spend',
+          ? `big drop: either the boost lapsed (check your qualifying spend) or that credit covers less than the ${a.days} days since ${fold.start}. If it was one day's worth, /undo and report each day.`
+          : 'that looks like a lapsed boost, not an error. Check your qualifying spend',
       );
   } else {
     // Keeping the good seed and saying why beats writing an authoritative wrong number
     // that nothing will ever pull back.
-    lines.push(`kept ${(account.rate * 100).toFixed(2)}% — ${learned.reason}`);
+    lines.push(`kept ${(account.rate * 100).toFixed(2)}%: ${learned.reason}`);
     if (learned.implied > 0) lines.push(`(this credit implies ${(learned.implied * 100).toFixed(2)}%)`);
   }
   return { lines, writes };
@@ -479,7 +530,7 @@ export async function interest(db: Db, accounts: Account[], arg: string, today: 
   }
 
   const account = acct(accounts, m[1].toLowerCase());
-  if (!account) return { text: `Unknown account "${m[1]}".` };
+  if (!account) return { text: noAccount(m[1], accounts) };
   const credited = parseAmount(m[2]);
   if (credited == null || credited <= 0) return { text: `Couldn't read "${m[2]}" as an amount.` };
   const date = resolveDate(m[3] ?? null, today, addDays);
@@ -518,5 +569,7 @@ export async function interest(db: Db, accounts: Account[], arg: string, today: 
       '',
       `heads up: anchoring on ${date} left +${peso(drifted.amount_centavos)} of drift, which may already BE this credit. If so, /undo this one.`,
     );
+  // Last line, always: a reported credit moved the balance, so the reply says where it left it.
+  out.push(await remaining(db, account, today));
   return { text: out.join('\n') };
 }

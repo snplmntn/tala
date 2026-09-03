@@ -13,10 +13,10 @@
 import { Db, type Account } from './db.ts';
 import type { Extracted } from './extract.ts';
 import { WEEKDAYS, addDays, dayDiff, peso, reminderDue, unsettled, type Event } from './ledger.ts';
-import { correct, money, transfer, undo } from './entries.ts';
+import { correct, money, transfer, undo, voidWithSiblings } from './entries.ts';
 import { anchorAccount, proposeAnchor, snapshot } from './anchors.ts';
-import { balances, csv, interest, rates, recap } from './reports.ts';
-import { acct, nowIso, type CallbackReply, type Reply } from './reply.ts';
+import { balances, csv, interest, rates, recap, remaining, remainingFor } from './reports.ts';
+import { acct, noAccount, nowIso, type CallbackReply, type Reply } from './reply.ts';
 import { mono } from './telegram.ts';
 
 export { anchorAccount, proposeAnchor, snapshot } from './anchors.ts';
@@ -46,7 +46,7 @@ export async function applyEvent(
       // that here is how the typed path and the spoken path drift into different answers.
       if (!e.account)
         return { text: `Which account credited that? (${accounts.map((a) => a.id).join(' / ')})` };
-      if (!e.amount) return { text: `${acct(accounts, e.account)?.name ?? e.account} — how much interest?` };
+      if (!e.amount) return { text: `${acct(accounts, e.account)?.name ?? e.account}: how much interest?` };
       return interest(db, accounts, [e.account, e.amount, e.date_hint].filter(Boolean).join(' '), ctx.today);
     }
     case 'open_account':
@@ -71,7 +71,7 @@ export async function applyEvent(
       return {
         text:
           e.reply?.trim() ||
-          'Not sure what to do with that. Tell me what you spent — like "250 jollibee maribank" — or /help.',
+          'Not sure what to do with that. Tell me what you spent, like "250 jollibee maribank", or /help.',
       };
   }
 }
@@ -83,8 +83,15 @@ export async function callback(db: Db, data: string, today: string): Promise<Cal
   const now = nowIso();
 
   if (kind === 'ok') {
+    // Where the balance goes for a logged row. The echo above still has live buttons, so its
+    // figure would be provisional; this tap is where the entry settles. The column write is
+    // presentational and no-ops if the 08:00 close-out already set it, so the line below is
+    // the whole point of the tap either way.
+    const row = await db.one<Event>('SELECT * FROM events WHERE id = ?', [Number(a)]);
+    if (!row) return { text: 'That row is gone.' };
     await db.batch([db.confirmEvent(Number(a), now)]);
-    return { text: '✓ confirmed' };
+    const account = acct(await db.accounts(), row.account_id);
+    return { text: account ? `✓ confirmed, ${await remaining(db, account, today)}` : '✓ confirmed' };
   }
 
   if (kind === 'void') {
@@ -95,9 +102,11 @@ export async function callback(db: Db, data: string, today: string): Promise<Cal
     if (row.voided_at) return { text: 'Already voided.' };
     const anchor = await db.latestSnapshot(row.account_id);
     if (anchor && dayDiff(row.occurred_at, anchor.as_of_date) >= 0)
-      return { text: 'That period is already reconciled — correct it instead.' };
-    await db.batch([db.voidEvent(Number(a), now)]);
-    return { text: '🗑 voided' };
+      return { text: 'That period is already reconciled, correct it instead.' };
+    const siblings = await voidWithSiblings(db, row);
+    const extra = siblings.length > 1 ? ` (+${siblings.length - 1} paired)` : '';
+    const left = await remainingFor(db, await db.accounts(), siblings, today);
+    return { text: `🗑 voided${extra}${left ? `, ${left}` : ''}` };
   }
 
   if (kind === 'adj') {
@@ -105,12 +114,13 @@ export async function callback(db: Db, data: string, today: string): Promise<Cal
     if (!row || row.type !== 'adjustment') return { text: 'That row is gone.' };
     // The category is why this number is worth anything. Written to the row that already exists.
     await db.run('UPDATE events SET category = ? WHERE id = ? AND category IS NULL', [a, Number(b)]);
-    return { text: `Tagged as ${a}.` };
+    return { text: `✓ tagged as ${a}` };
   }
 
   if (kind === 'snap') {
-    const account = (await db.accounts()).find((x) => x.id === a);
-    if (!account) return { text: 'Unknown account.' };
+    const accounts = await db.accounts();
+    const account = acct(accounts, a);
+    if (!account) return { text: noAccount(a, accounts) };
     // The whole reply, keyboard included: a first anchor answers with another question.
     return anchorAccount(db, account, Number(b), today);
   }
@@ -121,12 +131,12 @@ export async function callback(db: Db, data: string, today: string): Promise<Cal
     return accountsCmd(db, `add ${id} ${book} ${a} ${name ?? ''}`.trim());
   }
 
-  if (kind === 'anchored')
-    return { text: 'Kept as counted — the earlier spending stays in your recap only.' };
+  if (kind === 'anchored') return { text: 'Kept as counted, the earlier spending stays in your recap only.' };
 
   if (kind === 'anchorsub') {
-    const account = (await db.accounts()).find((x) => x.id === a);
-    if (!account) return { text: 'Unknown account.' };
+    const accounts = await db.accounts();
+    const account = acct(accounts, a);
+    if (!account) return { text: noAccount(a, accounts) };
     const anchor = await db.latestSnapshot(account.id);
     if (!anchor) return { text: 'No anchor to adjust.' };
     const amount = Number(b);
@@ -145,12 +155,10 @@ export async function callback(db: Db, data: string, today: string): Promise<Cal
         note: 'pre-anchor spending applied on request',
       } as never),
     ]);
-    return {
-      text: `Applied ${peso(Math.abs(amount))} — balance is now ${peso(anchor.balance_centavos + amount)}.`,
-    };
+    return { text: `applied ${peso(Math.abs(amount))}, ${await remaining(db, account, today)}` };
   }
 
-  if (kind === 'nope') return { text: 'Cancelled — nothing was written.' };
+  if (kind === 'nope') return { text: '✗ cancelled, nothing was written' };
   // Advice, not an action. Both of these are waiting on a message you have not typed yet,
   // so taking the buttons away would strand you if you changed your mind.
   if (kind === 'tx')
@@ -186,7 +194,7 @@ export const COMMANDS = [
 ] as const;
 
 export const HELP = [
-  'Tala — just say what you spent.',
+  'Tala: just say what you spent.',
   mono(
     [
       '250 jollibee maribank',
@@ -199,13 +207,15 @@ export const HELP = [
   ),
   // One per line, NOT padded into columns: a /command inside a monospace block stops being
   // tappable, and tapping beats alignment on a list you read once.
-  ...COMMANDS.map((c) => `/${c.name}${c.args ? ' ' + c.args : ''} — ${c.help}`),
+  ...COMMANDS.map((c) => `/${c.name}${c.args ? ' ' + c.args : ''}: ${c.help}`),
   '',
   'An ANCHOR is a real balance you read off your banking app. Everything is counted forward',
-  'from it, so /snap is the one habit worth keeping — the rest is just telling me things.',
+  'from it, so /snap is the one habit worth keeping. The rest is just telling me things.',
   '',
-  'Balances show confirmed (what the bank credited) and expected (plus today’s',
-  'uncredited interest). (est) means the rate is still a seed — /interest clears it.',
+  "Balances show confirmed (what the bank credited) and expected (plus today's",
+  'uncredited interest). (est) means the rate is still a seed, /interest clears it.',
+  '',
+  'Entries you do not tap confirm themselves at 08:00 the next morning, on the daily line.',
 ].join('\n');
 
 /**
@@ -218,11 +228,11 @@ export async function firstRun(db: Db, accounts: Account[]): Promise<string | nu
   if (await db.one('SELECT 1 FROM snapshots LIMIT 1')) return null;
   const name = await db.getSetting('owner_name');
   return [
-    name ? `Hi ${name} — let's set this up.` : "Welcome. I'm Tala, and I track your money in this chat.",
+    name ? `Hi ${name}, let's set this up.` : "Welcome. I'm Tala, and I track your money in this chat.",
     '',
     ...(name ? [] : ['First, what should I call you?', '  /name Sean', '']),
-    `${name ? 'Tell' : 'Then tell'} me what each account actually holds right now. That is an ANCHOR — the real`,
-    'balance from your banking app — and everything gets counted forward from it.',
+    `${name ? 'Tell' : 'Then tell'} me what each account actually holds right now. That is an ANCHOR: the real`,
+    'balance from your banking app, and everything gets counted forward from it.',
     mono(accounts.map((a) => `${a.id} 1234.56`).join('\n')),
     `Your accounts: ${accounts.map((a) => a.id).join(', ')}   (/account to add or close one)`,
     '',
@@ -263,7 +273,7 @@ export async function runCommand(
       // system prompt, so a pasted essay would be prompt text, not a nickname.
       const next = arg.replace(/\s+/g, ' ').trim().slice(0, 40);
       await db.setSetting('owner_name', next);
-      return { text: `Got it — ${next} it is.` };
+      return { text: `Got it, ${next} it is.` };
     }
     case 'balance':
       return { text: (await firstRun(db, accounts)) ?? (await balances(db, accounts, today)) };
@@ -288,7 +298,7 @@ export async function runCommand(
       return { text: owed > 0 ? `owed to you: ${peso(owed)}` : 'nothing outstanding' };
     }
     case 'undo':
-      return { text: await undo(db) };
+      return { text: await undo(db, accounts, today) };
     case 'csv':
       return { text: 'ledger attached', document: { filename: `tala-${today}.csv`, content: await csv(db) } };
     default:
@@ -328,14 +338,14 @@ export async function proposeAccount(db: Db, name: string | null, book: string |
   if (existing)
     return {
       text: existing.active
-        ? `${existing.name} is already open — just log to it.`
+        ? `${existing.name} is already open, just log to it.`
         : `${existing.name} is closed. /account on ${id} reopens it, history and all.`,
     };
 
   const bk = book === 'business' ? 'business' : 'personal';
   const payload = `${bk}|${id}|${clean}`;
   return {
-    text: `Open ${clean} as a ${bk} account — what kind is it?`,
+    text: `Open ${clean} as a ${bk} account. What kind is it?`,
     keyboard: [
       KINDS.map((k) => ({ text: k, callback_data: `open:${k}:${payload}` })),
       [{ text: '✗ cancel', callback_data: 'nope' }],
@@ -483,7 +493,7 @@ export async function remindCmd(db: Db, arg: string, today: string): Promise<Rep
     });
     return {
       text: [
-        'Reminders — they ride on the daily line, just after midnight in Manila.',
+        'Reminders: they ride on the daily line, at 08:00 in Manila.',
         mono(lines.join('\n')),
         '/remind off <n> to drop one · /remind for the full syntax',
       ].join('\n'),
@@ -516,13 +526,13 @@ export async function remindCmd(db: Db, arg: string, today: string): Promise<Rep
     .slice(0, MAX_TEXT);
   if (!text) return { text: `Remind you of what? e.g. /remind ${rest[0]} boost maya` };
   if (list.length >= MAX_REMINDERS)
-    return { text: `That is ${MAX_REMINDERS} reminders already — /remind off <n> to make room.` };
+    return { text: `That is ${MAX_REMINDERS} reminders already. /remind off <n> to make room.` };
 
   const row: Reminder = every ? { when, text, every: true } : { when, text };
   await saveReminders(db, [...list, row]);
   const next = nextFire(when, today);
   return {
-    text: `⏰ ${text}\n${WHEN_LABEL(when)}${every ? ', every time it comes round' : ', once'} — next ${next}`,
+    text: `⏰ ${text}\n${WHEN_LABEL(when)}${every ? ', every time it comes round' : ', once'}, next ${next}`,
   };
 }
 
@@ -552,7 +562,7 @@ export async function accountsCmd(db: Db, arg: string): Promise<Reply> {
     });
     return {
       text: [
-        'Accounts — this list is the closed set the extractor may choose from.',
+        'Accounts: this list is the closed set the extractor may choose from.',
         mono(lines.join('\n')),
         `/account add <id> <${BOOKS.join('|')}> <${KINDS.join('|')}> [display name]`,
         '/account off <id>     close it (history stays, extractor stops offering it)',
@@ -570,7 +580,7 @@ export async function accountsCmd(db: Db, arg: string): Promise<Reply> {
     if (!existing) return { text: `No account "${id}".` };
     await db.batch([db.setAccountActive(existing.id, verb === 'on')]);
     return {
-      text: `${existing.name} ${verb === 'on' ? 'reopened' : 'closed — history kept, no longer offered'}`,
+      text: `${existing.name} ${verb === 'on' ? 'reopened' : 'closed, history kept, no longer offered'}`,
     };
   }
 
@@ -584,7 +594,9 @@ export async function accountsCmd(db: Db, arg: string): Promise<Reply> {
   // than sanitised — a silently mangled id is an account you cannot spend from.
   const cleanId = id.toLowerCase();
   if (!/^[a-z][a-z0-9]{1,15}$/.test(cleanId))
-    return { text: `"${id}" won't work as an id — lowercase letters and digits, 2-16 chars, e.g. seabank.` };
+    return {
+      text: `"${id}" won't work as an id: lowercase letters and digits, 2-16 chars, e.g. seabank.`,
+    };
   // The usage line rides along on both: spoken input reaches here as the same argument
   // string, and "Book must be one of" alone does not tell you where the word belongs.
   const usage = `/account add <id> <${BOOKS.join('|')}> <${KINDS.join('|')}> [display name]`;
@@ -602,7 +614,7 @@ export async function accountsCmd(db: Db, arg: string): Promise<Reply> {
   if (kind === 'credit') {
     // The sign convention, stated at the one moment it matters. Liabilities carry negative
     // balances so net worth stays SUM(balance) regardless of kind.
-    lines.push('A credit account carries a NEGATIVE balance — spending on it increases what you owe.');
+    lines.push('A credit account carries a NEGATIVE balance: spending on it increases what you owe.');
   }
   lines.push(`Anchor it: /snap ${cleanId} <amount>`);
   lines.push(`Earns interest? /rate ${cleanId} 4% gross`);

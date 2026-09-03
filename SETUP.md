@@ -484,7 +484,8 @@ the social-engineering attacks that _do_ move money on PH e-wallets.
 
 ## Living with it
 
-**Daily**, at Manila midnight, the bot sends one line: six balances plus anchor age and any
+**Daily**, at 08:00 Manila, the bot sends one line: what it confirmed overnight, six balances
+plus anchor age and any
 broken-transfer count. Its job is not insight — it is latency. It cuts the window in which an
 error is still attributable from thirty days to one, which is the difference between "that
 was the Grab ride" and an unexplained ₱430 adjustment next month.

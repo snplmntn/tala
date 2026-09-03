@@ -8,11 +8,13 @@
  * can never cost you the record.
  */
 
+import { randomUUID } from 'node:crypto';
+
 import { Db, type Account } from './db.ts';
 import { CATEGORIES, resolveDate, type Extracted } from './extract.ts';
 import { addDays, bookingDate, lateEntryPair, parseAmount, peso, type Event } from './ledger.ts';
 import { acct, nowIso, rowKeys, type Reply } from './reply.ts';
-import { learnFromCredit } from './reports.ts';
+import { learnFromCredit, remaining, remainingFor } from './reports.ts';
 
 export async function money(
   db: Db,
@@ -27,13 +29,13 @@ export async function money(
   // which card paid — so a photo always lands here, and this IS the confirm step.
   if (amount == null && !account) {
     const what = e.merchant ? ` at ${e.merchant}` : '';
-    return { text: `Got a purchase${what} — how much, and from which account?` };
+    return { text: `Got a purchase${what}. How much, and from which account?` };
   }
-  if (amount == null) return { text: `${account!.name} — how much?` };
+  if (amount == null) return { text: `${account!.name}: how much?` };
   if (!account) {
     const names = accounts.map((a) => a.id).join(' / ');
     const what = e.merchant ? `${peso(amount)} at ${e.merchant}` : peso(amount);
-    return { text: `${what} — which account? (${names})` };
+    return { text: `${what}: which account? (${names})` };
   }
 
   const signed = e.intent === 'income' ? Math.abs(amount) : -Math.abs(amount);
@@ -106,45 +108,65 @@ export async function transfer(
     return { text: `Transfer from which account to which? (${accounts.map((a) => a.id).join(' / ')})` };
   if (from.id === to.id) return { text: 'Source and destination are the same account.' };
 
-  const tid = `t${Date.now().toString(36)}`;
+  // Random, not the clock. `Date.now()` collided whenever two transfers landed in the same
+  // millisecond, and then brokenTransfers() saw one group with four legs and called BOTH
+  // transfers broken. One message carrying two transfers does exactly that.
+  const tid = `t${randomUUID().slice(0, 8)}`;
   const fee = parseAmount(e.fee);
   const occurred = resolveDate(e.date_hint, ctx.today, addDays) ?? ctx.today;
-  const common = { inbox_id: ctx.inboxId, occurred_at: occurred, logged_at: nowIso(), transfer_id: tid };
+  const common = { inbox_id: ctx.inboxId, logged_at: nowIso(), transfer_id: tid };
 
-  const writes = [
-    db.insertEvent({
-      ...common,
-      type: 'transfer',
-      book: from.book,
-      account_id: from.id,
-      amount_centavos: -Math.abs(amount),
-      fee_centavos: fee,
-    } as never),
-    db.insertEvent({
-      ...common,
-      type: 'transfer',
-      book: to.book,
-      account_id: to.id,
-      amount_centavos: Math.abs(amount),
-    } as never),
+  // Booked PER LEG, because the two accounts have their own anchors. This used to write both
+  // legs on the raw date, which silently lost the whole transfer: the reconciliation window
+  // is (anchor, next] and EXCLUSIVE, so a leg dated on its account's anchor day falls outside
+  // every window and moves no balance. money() has always routed through bookingDate for
+  // exactly this; transfer() never did, and the loss only surfaced as drift a month later.
+  const fromBook = bookingDate(occurred, (await db.latestSnapshot(from.id))?.as_of_date ?? null);
+  const toBook = bookingDate(occurred, (await db.latestSnapshot(to.id))?.as_of_date ?? null);
+  const late = fromBook.lateFor ?? toBook.lateFor;
+
+  const out = {
+    ...common,
+    occurred_at: fromBook.date,
+    type: 'transfer',
+    book: from.book,
+    account_id: from.id,
+    amount_centavos: -Math.abs(amount),
+    fee_centavos: fee,
+  };
+  const into = {
+    ...common,
+    occurred_at: toBook.date,
+    type: 'transfer',
+    book: to.book,
+    account_id: to.id,
+    amount_centavos: Math.abs(amount),
+  };
+  // A leg dated before its anchor is money the anchor ALREADY contains, so it books as the
+  // same net-to-zero pair a late expense does. The offset is an adjustment, and
+  // brokenTransfers() counts only rows of type 'transfer', so the group still reads as two
+  // legs netting to zero.
+  const rows: unknown[] = [
+    ...(fromBook.lateFor ? lateEntryPair(out, fromBook.lateFor) : [out]),
+    ...(toBook.lateFor ? lateEntryPair(into, toBook.lateFor) : [into]),
   ];
   // The fee is a third row in category 'fees' — captured by asking, because you are looking
   // at it on screen while you type. No per-account fee table, no free-transfer counter.
   if (fee) {
-    writes.push(
-      db.insertEvent({
-        ...common,
-        type: 'expense',
-        book: from.book,
-        account_id: from.id,
-        amount_centavos: -Math.abs(fee),
-        category: 'fees',
-        note: 'transfer fee',
-      } as never),
-    );
+    const feeRow = {
+      ...common,
+      occurred_at: fromBook.date,
+      type: 'expense',
+      book: from.book,
+      account_id: from.id,
+      amount_centavos: -Math.abs(fee),
+      category: 'fees',
+      note: 'transfer fee',
+    };
+    rows.push(...(fromBook.lateFor ? lateEntryPair(feeRow, fromBook.lateFor) : [feeRow]));
   }
   // One batch. Two sequential awaits is how you get half a ₱3,000 transfer.
-  await db.batch(writes);
+  await db.batch(rows.map((r) => db.insertEvent(r as never)));
 
   const crossBook = from.book !== to.book;
   const lines = [`${peso(Math.abs(amount))} · ${from.name} → ${to.name}${fee ? ` (+${peso(fee)} fee)` : ''}`];
@@ -152,9 +174,13 @@ export async function transfer(
     // Not a net-worth drop: it is you capitalising the company, or drawing from it.
     lines.push(to.book === 'business' ? 'recorded as an owner contribution' : 'recorded as an owner draw');
   }
+  if (late) lines.push(`late entry for ${late}, balance unchanged`);
   if (!fee && (from.id === 'gcash' || from.id === 'maya')) {
     lines.push('any InstaPay fee? reply: fee 10');
   }
+  // Both sides. A transfer is the one write where "what is left" is two questions, and it
+  // carries no buttons to hang the answer on, so it goes inline.
+  lines.push(`${await remaining(db, from, ctx.today)}, ${await remaining(db, to, ctx.today)}`);
   return { text: lines.join('\n') };
 }
 
@@ -172,7 +198,9 @@ export async function correct(
     account: e.account,
   });
   if (!target)
-    return { text: "Couldn't find that row. Name the old amount or the merchant — or /undo the last entry." };
+    return {
+      text: "Couldn't find that row. Name the old amount or the merchant, or /undo the last entry.",
+    };
 
   const newAmount = parseAmount(e.amount);
   if (newAmount == null) return { text: 'Correct it to what amount?' };
@@ -221,23 +249,41 @@ export async function correct(
   ]
     .filter(Boolean)
     .join(', ');
-  return { text: [`${label} → ${peso(Math.abs(signed))}`, ...(relearn?.lines ?? [])].join('\n') };
+  return {
+    text: [
+      `${label} → ${peso(Math.abs(signed))}`,
+      ...(relearn?.lines ?? []),
+      await remaining(db, account, ctx.today),
+    ].join('\n'),
+  };
 }
 
 // ── undo ────────────────────────────────────────────────────────────────────
 
+/**
+ * Void a row and every row the same message produced.
+ *
+ * A late entry writes a PAIR that nets to zero, so killing half of it moves the balance the
+ * pair exists to leave alone. A transfer is two legs plus a fee row, and half a transfer is
+ * what brokenTransfers() exists to detect. /undo has always done this; the 🗑 void button
+ * voided a single id and could halve either, so both now take this one path.
+ */
+export async function voidWithSiblings(db: Db, row: Event): Promise<Event[]> {
+  const siblings = row.inbox_id
+    ? await db.all<Event>('SELECT * FROM events WHERE inbox_id = ? AND voided_at IS NULL', [row.inbox_id])
+    : [row];
+  await db.batch(siblings.map((r) => db.voidEvent(r.id, nowIso())));
+  return siblings;
+}
+
 /** The one row class a matcher can never address: a bare "13" with no merchant and no note. */
-export async function undo(db: Db): Promise<string> {
+export async function undo(db: Db, accounts: Account[], today: string): Promise<string> {
   const last = await db.lastEvent();
   if (!last) return 'nothing to undo';
-  // Void every row the same message produced, not just the newest. A late entry writes a
-  // PAIR that nets to zero, and voiding half of it would move the balance the pair exists
-  // to leave alone. Same for a transfer's two legs plus its fee row.
-  const siblings = last.inbox_id
-    ? await db.all<Event>('SELECT * FROM events WHERE inbox_id = ? AND voided_at IS NULL', [last.inbox_id])
-    : [last];
-  await db.batch(siblings.map((r) => db.voidEvent(r.id, nowIso())));
+  const siblings = await voidWithSiblings(db, last);
 
   const extra = siblings.length > 1 ? ` (+${siblings.length - 1} paired)` : '';
-  return `voided: ${last.type} ${peso(Math.abs(last.amount_centavos))} ${last.account_id} ${last.occurred_at}${extra}`;
+  const line = `voided: ${last.type} ${peso(Math.abs(last.amount_centavos))} ${last.account_id} ${last.occurred_at}${extra}`;
+  const left = await remainingFor(db, accounts, siblings, today);
+  return left ? `${line}\n${left}` : line;
 }
