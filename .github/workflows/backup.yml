@@ -19,8 +19,8 @@ jobs:
   dump:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -33,6 +33,10 @@ jobs:
           AGE_PUBLIC_KEY: ${{ secrets.AGE_PUBLIC_KEY }}
         run: |
           set -euo pipefail
+          # A missing secret otherwise surfaces 40s later as: unknown recipient type: ""
+          for v in TURSO_URL TURSO_TOKEN AGE_PUBLIC_KEY; do
+            [ -n "${!v:-}" ] || { echo "::error::missing repo secret $v - see SETUP.md step 6"; exit 1; }
+          done
           sudo apt-get update -qq && sudo apt-get install -y -qq age
           # Plaintext in git is effectively unrevocable — one visibility flip, one leaked
           # token, one stolen clone reads every transaction ever recorded.
