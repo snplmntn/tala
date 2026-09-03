@@ -99,6 +99,13 @@ sent 2k from maya to gotyme, fee 10
 A receipt photo works too. It reads the merchant, the date and the total, then asks which
 account paid — no receipt on earth says which card was used.
 
+### Opening an account
+
+Tell it in words — _"open a beep card account"_, _"start tracking my BPI"_ — and it creates one,
+guessing personal/business and bank/ewallet/cash/credit from how you said it. It comes back
+untracked and un-anchored, so follow with `/snap beepcard 21` to give it a balance. Wrong guess:
+`/account off beepcard` closes it and the history stays.
+
 ### What it will refuse to guess
 
 If you do not say which account, it asks. If you do not say how much, it asks. It will never
@@ -236,7 +243,8 @@ Worth doing once a month:
 quota is gone. Your message is on disk and retries automatically. Nothing is lost.
 
 **It asks which account when you already said one** — the account name has to be one it knows.
-`/account` lists them; `/account add seabank personal bank SeaBank` adds one.
+`/account` lists them. Say _"open a seabank account"_ and it adds one, or spell it out yourself
+with `/account add seabank personal bank SeaBank`.
 
 **A number looks wrong** — `/csv` shows every row including voided and superseded ones. The
 ledger keeps its whole history, so the answer is always in there.

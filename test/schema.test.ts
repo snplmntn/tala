@@ -211,6 +211,47 @@ test('a new account joins the extractor enum with no redeploy', async () => {
   assert.equal(row.active, 1);
 });
 
+test('an account can be opened by talking, not only by a slash command', async () => {
+  // The extractor's account field is a closed enum, so before this existed the only way to
+  // add to that enum was /account add — and the bot answered "I can't open an account".
+  // The event carries the command's own argument string so the validation is not duplicated.
+  const db = await fresh();
+  const spoken = (new_account: string | null) =>
+    applyEvent(
+      db,
+      [],
+      {
+        intent: 'open_account',
+        new_account,
+        amount: null,
+        account: null,
+        to_account: null,
+        category: null,
+        merchant: null,
+        note: null,
+        date_hint: null,
+        shared_amount: null,
+        recurrence: 'one_off',
+        fee: null,
+        query_kind: null,
+        match_amount: null,
+        match_merchant: null,
+        looks_like_transfer: false,
+        reply: null,
+      },
+      { inboxId: 1, today: '2026-09-03', hadPhoto: false },
+    );
+
+  const opened = await spoken('beepcard personal ewallet Beep Card');
+  assert.match(opened.text, /Beep Card added/);
+  assert.equal((await db.accountIds()).includes('beepcard'), true, 'usable on the very next message');
+
+  // The id rules still bite, because it is the same code path as the slash command.
+  assert.match((await spoken('beep-card personal ewallet')).text, /won't work as an id/);
+  assert.match((await spoken('beepcard personal ewallet')).text, /already exists/);
+  assert.match((await spoken(null)).text, /What should I call it/);
+});
+
 test('closing an account hides it from the enum but keeps its history', async () => {
   // Never a DELETE: events reference accounts, so deleting would either fail on the foreign
   // key or orphan rows. Closing has to preserve every past figure.
@@ -259,6 +300,7 @@ test('a natural-language anchor writes nothing until confirmed', async () => {
     match_amount: null,
     match_merchant: null,
     looks_like_transfer: false,
+    new_account: null,
     reply: null,
   };
 
@@ -323,6 +365,7 @@ test('a spoken question is answered, not redirected to a slash command', async (
       match_amount: null,
       match_merchant: null,
       looks_like_transfer: false,
+      new_account: null,
       reply: null,
     },
     { inboxId: 1, today: '2026-09-03', hadPhoto: false },

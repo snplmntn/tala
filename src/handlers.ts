@@ -40,6 +40,15 @@ export async function applyEvent(
       return correct(db, accounts, e, ctx);
     case 'snapshot':
       return proposeAnchor(db, accounts, e, ctx.today);
+    case 'open_account':
+      // Straight to the command, arguments and all: /account add already owns the id rules,
+      // the duplicate check and the credit-sign warning, and a second copy of that here is
+      // how the two would drift. The extractor's job is only to write the arguments.
+      // ponytail: created outright, no confirm button — /account off reverses it, and an
+      // account with no rows costs nothing. Gate it if typos start opening accounts.
+      return e.new_account
+        ? accountsCmd(db, `add ${e.new_account}`)
+        : { text: 'What should I call it? Like "open a seabank account".' };
     case 'query': {
       // The extractor already classified this, so honour it. A query is read-only: there is
       // no correctness argument for making you remember a slash command to ask a question.
@@ -327,8 +336,11 @@ export async function accountsCmd(db: Db, arg: string): Promise<Reply> {
   const cleanId = id.toLowerCase();
   if (!/^[a-z][a-z0-9]{1,15}$/.test(cleanId))
     return { text: `"${id}" won't work as an id — lowercase letters and digits, 2-16 chars, e.g. seabank.` };
-  if (!BOOKS.includes(book as never)) return { text: `Book must be one of: ${BOOKS.join(', ')}` };
-  if (!KINDS.includes(kind as never)) return { text: `Kind must be one of: ${KINDS.join(', ')}` };
+  // The usage line rides along on both: spoken input reaches here as the same argument
+  // string, and "Book must be one of" alone does not tell you where the word belongs.
+  const usage = `/account add <id> <${BOOKS.join('|')}> <${KINDS.join('|')}> [display name]`;
+  if (!BOOKS.includes(book as never)) return { text: `Book must be one of: ${BOOKS.join(', ')}\n${usage}` };
+  if (!KINDS.includes(kind as never)) return { text: `Kind must be one of: ${KINDS.join(', ')}\n${usage}` };
 
   const all = await db.allAccounts();
   if (all.some((a) => a.id === cleanId))

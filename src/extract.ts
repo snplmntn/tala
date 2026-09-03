@@ -30,7 +30,8 @@ export const CATEGORIES = [
 export const MODEL = 'qwen/qwen3.8-27b'; // text AND vision, strict schema, own free-tier bucket
 const ENDPOINT = 'https://api.groq.com/openai/v1/chat/completions';
 
-export type Intent = 'expense' | 'income' | 'transfer' | 'query' | 'correction' | 'snapshot' | 'unknown';
+export type Intent =
+  'expense' | 'income' | 'transfer' | 'query' | 'correction' | 'snapshot' | 'open_account' | 'unknown';
 
 export interface Extracted {
   intent: Intent;
@@ -48,6 +49,8 @@ export interface Extracted {
   match_amount: string | null;
   match_merchant: string | null;
   looks_like_transfer: boolean;
+  /** Only for intent: open_account — the `/account add` arguments, validated by the command itself. */
+  new_account: string | null;
   /** Only for intent: unknown — the words to say back. Every other intent is answered by code. */
   reply: string | null;
 }
@@ -124,17 +127,28 @@ function schema(accountIds: string[]) {
             'match_amount',
             'match_merchant',
             'looks_like_transfer',
+            'new_account',
             'reply',
           ],
           properties: {
             intent: {
               type: 'string',
-              enum: ['expense', 'income', 'transfer', 'query', 'correction', 'snapshot', 'unknown'],
+              enum: [
+                'expense',
+                'income',
+                'transfer',
+                'query',
+                'correction',
+                'snapshot',
+                'open_account',
+                'unknown',
+              ],
               description:
                 "expense = money left an account. income = money arrived. transfer = moved between two of the user's OWN accounts. " +
                 'correction = fixing a PAST entry ("the X was 285 not 250", "that was gcash not maya"). ' +
                 'query = asking a question, not recording anything ("how much do I have", "recap"). ' +
                 'snapshot = REPORTING a current bank balance read from an app ("maya is at 98000", "my maribank shows 12850"). ' +
+                'open_account = asking to START TRACKING an account or card that is not in the list yet. ' +
                 'unknown = only when none of the above fits.',
             },
             // Strings, always. The model transcribes; code parses. It must never compute.
@@ -192,6 +206,13 @@ function schema(accountIds: string[]) {
               description:
                 'true if the wording is sent/moved/transferred/cash-in — even when intent is expense',
             },
+            new_account: {
+              ...nullableString,
+              description:
+                'ONLY for intent=open_account: the new account as "<id> <personal|business> <bank|ewallet|cash|credit> [display name]", ' +
+                'e.g. "beepcard personal ewallet Beep Card". The id is lowercase letters and digits only, 2-16 chars, no spaces. ' +
+                'Null for every other intent.',
+            },
             reply: {
               ...nullableString,
               description:
@@ -209,7 +230,7 @@ const SYSTEM = `You are Tala, a money tracker in a chat. You convert one Filipin
 HARD RULES:
 - NEVER compute, convert or sum anything. Copy amounts exactly as written, as strings.
 - NEVER guess the account. If the message does not say which account or card, return account: null. Asking is correct; guessing misfiles money.
-- NEVER invent an account name. Use only the given ids.
+- NEVER invent an account name. Use only the given ids — the one exception is intent: open_account, which is how a new id comes into existence.
 - If the amount is not stated, return amount: null. Do not estimate from the merchant.
 - Non-peso amounts ("$20 for cursor"): return amount: null and put the original in note. The peso amount the card was actually charged is the only authoritative figure, and you do not know it.
 - "for myself" means shared_amount is null. Only set shared_amount when the user says they covered others.
@@ -236,6 +257,11 @@ CHOOSING THE INTENT — this is the part that matters most:
 - Moving money between two of the user's OWN accounts -> transfer, with account = source and to_account = destination. A fee the user mentions goes in the "fee" field, NOT in "category".
 - FIXING SOMETHING ALREADY LOGGED -> correction. Phrases like "the jollibee was 285 not 250", "that was 300", "it was gcash not maya", "wrong amount". Put the OLD amount in match_amount and the merchant in match_merchant so the row can be found, and the NEW amount in amount. Never return an expense for a correction — that would record the purchase twice.
 - ASKING A QUESTION, recording nothing -> query, with query_kind set. "how much do I have" / "what's my balance" -> balance. "recap" / "how much did I spend" -> recap. "who owes me" -> owed. "export" -> csv.
+- ASKING TO TRACK AN ACCOUNT OR CARD THAT IS NOT IN THE LIST -> open_account, with "new_account" filled in. "open a beep card account", "add seabank", "start tracking my BPI". Never answer that you cannot open one, and never file it under an existing account that merely sounds close.
+  - id: what they called it, lowercased, letters and digits only, no spaces ("beep card" -> beepcard, "BPI" -> bpi).
+  - book: personal unless they say it is for the business. kind: bank for a bank, ewallet for a GCash/Maya-style wallet or a stored-value card, cash for physical money, credit for a credit card or loan.
+  - display name: how they wrote it, e.g. "Beep Card".
+  - If the SAME message also states a balance, still return ONLY open_account. The account has to exist before a balance can be anchored to it, and the reply says how.
 - REPORTING A BALANCE they just read in their banking app -> snapshot, with account and amount. "maya is at 98000", "maribank shows 12,850", "my gcash balance is 340". This is NOT income and NOT an expense: it is a statement of what an account currently holds.
 - Use unknown when nothing above fits, and then always write "reply". Do not fall back to unknown for a question or a balance report.
 
