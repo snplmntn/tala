@@ -1,9 +1,17 @@
 /**
- * The only place the LLM lives.
+ * The only place the LLM lives. Two calls, and the difference between them is the invariant.
  *
- * Its entire job is prose -> a typed event. It never sees a balance, never produces one,
- * and never does arithmetic: amounts come back as STRINGS and are parsed by
- * ledger.parseAmount, so a misread digit is a rejected message rather than a wrong balance.
+ * extract() turns prose into a typed event, and on that path the model never sees a balance,
+ * never produces one, and never does arithmetic: amounts come back as STRINGS and are parsed
+ * by ledger.parseAmount, so a misread digit is a rejected message rather than a wrong balance.
+ * Every WRITE goes through there, which is where the guarantee is worth paying for.
+ *
+ * answer() is the read-only half, and it does see computed numbers. It runs only after a
+ * report has already been rendered by code, it writes prose that is appended BELOW that
+ * report, and nothing it says is ever parsed back into a row. So the worst it can do is
+ * describe a correct table badly, in public, next to the table. That is a real cost and it
+ * buys the thing a ledger you talk to actually needs: an answer to a question nobody wrote
+ * a template for.
  *
  * Groq free tier, one fetch. `strict: true` is constrained decoding at the sampler, not a
  * post-hoc validation, so the shape is guaranteed and only the VALUES need checking.
@@ -62,6 +70,8 @@ export interface Extracted {
   new_account_book: 'personal' | 'business' | null;
   /** Only for intent: unknown — the words to say back. Every other intent is answered by code. */
   reply: string | null;
+  /** Only for intent: query — the question to answer in prose UNDER the report. Null for a bare request. */
+  ask: string | null;
 }
 
 /** One side of the conversation, as the model sees it. */
@@ -139,6 +149,7 @@ function schema(accountIds: string[]) {
             'new_account',
             'new_account_book',
             'reply',
+            'ask',
           ],
           properties: {
             intent: {
@@ -237,6 +248,15 @@ function schema(accountIds: string[]) {
               description:
                 'ONLY for intent=unknown: what to say back, in your own words. Null for every other intent.',
             },
+            ask: {
+              ...nullableString,
+              description:
+                'ONLY for intent=query. The question the user is actually asking, in their own words, when the ' +
+                'message is a QUESTION ABOUT the numbers rather than a bare request FOR them. ' +
+                '"did my interest get added to my balance?" / "why does maya say est?" / "is that the whole day?" -> set it. ' +
+                '"balance" / "recap" / "how much do I have" -> null, the table already answers that. ' +
+                'Null for every other intent.',
+            },
           },
         },
       },
@@ -277,13 +297,14 @@ CHOOSING THE INTENT — this is the part that matters most:
 - FIXING SOMETHING ALREADY LOGGED -> correction. Phrases like "the jollibee was 285 not 250", "that was 300", "it was gcash not maya", "wrong amount". Put the OLD amount in match_amount and the merchant in match_merchant so the row can be found, and the NEW amount in amount. Never return an expense for a correction — that would record the purchase twice.
 - A BANK CREDITING INTEREST or earnings on their own savings -> interest, with account, amount and date_hint. "maya credited 21.48", "got 8 pesos interest on maribank", "maribank paid 15 yesterday", "earned 21.48 today". This is NOT income: income is money arriving from outside, interest is a pot paying the user, and the projected rate LEARNS from it. If they do not say which account, return account: null and it will be asked.
 - ASKING A QUESTION, recording nothing -> query, with query_kind set. "how much do I have" / "what's my balance" -> balance. "recap" / "how much did I spend" -> recap. "who owes me" -> owed. "export" -> csv. "how much interest have I earned" / "total earnings" -> interest.
+  - Then decide "ask". A bare REQUEST for a report ("balance", "recap", "how much do I have") gets ask: null, because the table is the whole answer. A QUESTION ABOUT the numbers gets the question copied into "ask": anything phrased did / does / is / was / why / how come / already / still, anything asking whether something is included, counted, added or missing, and any follow-up leaning on what was just said ("and is that the whole day?"). Copy their words. Do not answer it yourself — the app renders the table first and the answer goes underneath it.
 - ASKING TO TRACK AN ACCOUNT OR CARD THAT IS NOT IN THE LIST -> open_account. "open a beep card account", "add seabank", "start tracking my BPI", "add my beep card". Never answer that you cannot open one, and never file it under an existing account that merely sounds close.
   - new_account is the NAME ONLY, as they wrote it: "Beep Card", "SeaBank", "BPI". Never an id, never the word bank/ewallet/cash/credit, never an amount.
   - new_account_book is business only if they say so, otherwise personal.
   - Whether it is a bank, wallet, cash or credit is NOT yours to decide — the app asks with buttons. Do not put it anywhere.
   - If the SAME message also states a balance, still return ONLY open_account, and leave the amount out of the name. The account must exist before a balance can attach to it.
 - REPORTING A BALANCE they just read in their banking app -> snapshot, with account and amount. "maya is at 98000", "maribank shows 12,850", "my gcash balance is 340". This is NOT income and NOT an expense: it is a statement of what an account currently holds.
-- Use unknown when nothing above fits, and then always write "reply". Do not fall back to unknown for a question or a balance report.
+- Use unknown when nothing above fits, and then always write "reply". Do not fall back to unknown for a question about the user's own money: that is a query with "ask" set, which is how it gets answered against the real numbers instead of from memory.
 
 RECEIPT IMAGES: read merchant, date and the TOTAL. Do not try to read every line item. A receipt never says which card was used, so account must be null.`;
 
@@ -347,6 +368,77 @@ export async function extract(
   const raw = json.choices?.[0]?.message?.content ?? '';
   const parsed = JSON.parse(raw) as { events: Extracted[] };
   return { events: parsed.events ?? [], raw, model: MODEL };
+}
+
+/**
+ * Answer a question about numbers that CODE has already computed.
+ *
+ * The report is rendered first and sent whatever happens here — this only ever appends a
+ * paragraph beneath it. That ordering is the whole safety argument: the authoritative figures
+ * are already on screen, so a model that paraphrases one badly is contradicted in the same
+ * message rather than believed.
+ *
+ * No json_schema and no strict mode, unlike extract(). There is no shape to constrain: the
+ * output is prose, and the only thing that could go wrong with it is being wrong, which a
+ * schema does not check.
+ */
+export async function answer(
+  apiKey: string,
+  question: string,
+  report: string,
+  facts: string,
+  ctx: { today: string; history?: Turn[]; owner?: string | null },
+): Promise<string> {
+  const system = [
+    `You are Tala, a money tracker in a chat, talking to ${ctx.owner ?? 'the person whose ledger this is'}.`,
+    `Today in Manila: ${ctx.today}. The app has ALREADY sent them the report below; you write the answer under it.`,
+    '',
+    'RULES:',
+    '- Lead with the answer. Start with Yes or No ONLY for an actual yes/no question: a "why" or',
+    '  "how" answer opening with No reads as contradicting something nobody said.',
+    '- NEVER state a figure that is not already in the report or the facts, and never add, subtract',
+    '  or convert anything, however trivial. If the number they want is not there, say you cannot',
+    '  see it rather than working it out.',
+    '- Do not re-list the table. Say the one thing it does not say. Two or three sentences, no',
+    '  markdown, no bullets. If the ledger genuinely cannot tell, say so and name what would settle it.',
+    '',
+    'HOW A BALANCE IS BUILT, so you can explain it:',
+    '- An anchor is a real balance read off the banking app on a day; everything after counts forward',
+    '  from it. Balance = anchor + every row dated after it + interest projected since the last',
+    '  reported credit.',
+    '- A credit reported for the anchor day books to the day AFTER it, because the reconciliation',
+    '  window excludes the anchor day itself. It still counts, exactly once.',
+    '- "(est)" means the rate is still the seeded estimate: no credit has yet landed in a period',
+    '  bounded by two anchors, so there is nothing to learn a real rate from.',
+    '- "confirmed" should match the banking app; "expected" adds today\'s uncredited slice.',
+    '',
+    'THE REPORT THEY CAN SEE:',
+    report,
+    '',
+    'FACTS FROM THE LEDGER:',
+    facts,
+  ].join('\n');
+
+  const res = await fetch(ENDPOINT, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: MODEL,
+      temperature: 0,
+      max_tokens: 220,
+      // The last exchange only. Older turns are mostly stale report TABLES: they cost as much
+      // as the facts block and say less than it already says, and this call shares an 8k/min
+      // token ceiling with the extract() call that has to run for the NEXT message.
+      messages: [
+        { role: 'system', content: system },
+        ...(ctx.history ?? []).slice(-2),
+        { role: 'user', content: question },
+      ],
+    }),
+  });
+  if (!res.ok) throw new Error(`groq ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  const json = (await res.json()) as { choices: { message: { content: string } }[] };
+  return (json.choices?.[0]?.message?.content ?? '').trim();
 }
 
 /**

@@ -182,7 +182,13 @@ async function handle(line: string): Promise<void> {
 
   history.add('user', line);
   for (const ev of parsed.events) {
-    const r = await applyEvent(db, accounts, ev, { inboxId, today: t, hadPhoto: false });
+    const r = await applyEvent(db, accounts, ev, {
+      inboxId,
+      today: t,
+      hadPhoto: false,
+      groqKey: groq,
+      history: history.turns,
+    });
     console.log(plain(r.text));
     history.add('assistant', r.text);
     if (r.keyboard)

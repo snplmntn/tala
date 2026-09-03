@@ -11,11 +11,11 @@
  */
 
 import { Db, type Account } from './db.ts';
-import type { Extracted } from './extract.ts';
+import { answer, type Extracted, type Turn } from './extract.ts';
 import { WEEKDAYS, addDays, dayDiff, peso, reminderDue, unsettled, type Event } from './ledger.ts';
 import { correct, money, transfer, undo, voidWithSiblings } from './entries.ts';
 import { anchorAccount, proposeAnchor, snapshot } from './anchors.ts';
-import { balances, csv, interest, rates, recap, remaining, remainingFor } from './reports.ts';
+import { balances, csv, interest, queryFacts, rates, recap, remaining, remainingFor } from './reports.ts';
 import { acct, noAccount, nowIso, type CallbackReply, type Reply } from './reply.ts';
 import { mono } from './telegram.ts';
 
@@ -28,7 +28,15 @@ export async function applyEvent(
   db: Db,
   accounts: Account[],
   e: Extracted,
-  ctx: { inboxId: number; today: string; messageId?: number | null; hadPhoto: boolean },
+  ctx: {
+    inboxId: number;
+    today: string;
+    messageId?: number | null;
+    hadPhoto: boolean;
+    /** Absent in tests and in the REPL without a key: the report still sends, unexplained. */
+    groqKey?: string;
+    history?: Turn[];
+  },
 ): Promise<Reply> {
   switch (e.intent) {
     case 'expense':
@@ -59,11 +67,10 @@ export async function applyEvent(
       // and "what did I spend today" both reach a bare /recap, which answers for today —
       // so the spoken path would silently be able to ask only one of the two questions.
       const period = kind === 'recap' && e.date_hint ? ` ${e.date_hint}` : '';
-      return (
-        (await runCommand(db, accounts, `/${kind}${period}`, ctx.today)) ?? {
-          text: 'Ask me /balance or /recap.',
-        }
-      );
+      const report = (await runCommand(db, accounts, `/${kind}${period}`, ctx.today)) ?? {
+        text: 'Ask me /balance or /recap.',
+      };
+      return withAnswer(db, accounts, e, report, ctx);
     }
     default:
       // The extractor writes this one, because it is the only reply with nothing to state:
@@ -73,6 +80,42 @@ export async function applyEvent(
           e.reply?.trim() ||
           'Not sure what to do with that. Tell me what you spent, like "250 jollibee maribank", or /help.',
       };
+  }
+}
+
+/**
+ * The report, plus the answer to the question the report does not answer.
+ *
+ * A table says what a number IS. "did my interest get added", "why does this still say est",
+ * "is that the whole day" are questions about how it got there, and every one of them used to
+ * be routed to the nearest report and answered with a table the user had just seen. That is
+ * the difference between a ledger you read and a ledger you can talk to.
+ *
+ * BELOW the report, never instead of it: the code-computed figures stay first and stay
+ * authoritative, so prose that paraphrases one badly is contradicted in the same message.
+ *
+ * Failure is silent by design. A model that is rate-limited, slow or down must never cost you
+ * the answer you actually asked for, and the report is already complete without this.
+ */
+async function withAnswer(
+  db: Db,
+  accounts: Account[],
+  e: Extracted,
+  report: Reply,
+  ctx: { today: string; groqKey?: string; history?: Turn[] },
+): Promise<Reply> {
+  // A bare "balance" or "recap" gets nothing appended: the table IS the answer, and prose
+  // after it would be noise on the path that is already working.
+  if (!e.ask?.trim() || !ctx.groqKey || report.document) return report;
+  try {
+    const prose = await answer(ctx.groqKey, e.ask, report.text, await queryFacts(db, accounts, ctx.today), {
+      today: ctx.today,
+      history: ctx.history,
+      owner: await db.getSetting('owner_name'),
+    });
+    return prose ? { ...report, text: `${report.text}\n\n${prose}` } : report;
+  } catch {
+    return report;
   }
 }
 

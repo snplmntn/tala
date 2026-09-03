@@ -211,6 +211,10 @@ async function handle(u: Update): Promise<boolean> {
       today: today(),
       messageId: m.message_id,
       hadPhoto: hasPhoto,
+      // Only the query path spends this, and only when the message was a QUESTION about the
+      // numbers rather than a request for them. See withAnswer in handlers.ts.
+      groqKey: GROQ,
+      history: history.turns,
     });
     await send(TOKEN, m.chat.id, r.text, r.keyboard);
     history.add('assistant', r.text);

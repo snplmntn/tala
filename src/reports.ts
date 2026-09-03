@@ -53,6 +53,59 @@ export async function balanceFor(db: Db, account: Account, today: string): Promi
 }
 
 /**
+ * The ledger facts a rendered report leaves out, for answer() to explain from.
+ *
+ * A balance table says what the number IS. Almost every question about it is really about
+ * how it got there: whether a credit is already inside it, why an account still says (est),
+ * what moved since you last read the app. None of that is in the table, and a model asked to
+ * explain it without these lines will make something up that sounds right.
+ *
+ * Deliberately the raw shape rather than prose: dates, signed amounts, types. Sentences are
+ * what the model is for, and pre-writing them here would be a second copy of the explanation
+ * to keep in sync with the first.
+ *
+ * ponytail: every anchored account, rows capped per account. Seven accounts is ~500 tokens,
+ * against an 8,000/minute ceiling this call SHARES with the extract() call for the next
+ * message. Scope it to the accounts the question names if that ever stops being comfortable.
+ */
+const FACT_ROWS = 5;
+
+export async function queryFacts(db: Db, accounts: Account[], today: string): Promise<string> {
+  // The balance table goes in whatever report was rendered, because query_kind picks the
+  // report and it picks it from the wording. "did my interest reach my balance?" reads as an
+  // interest question and lands on the interest recap, which does not contain a balance — so
+  // without this the model is asked about a number it was never shown, and answers about the
+  // one in front of it instead. Costs a few hundred tokens; buys an answer to the question
+  // that was actually asked whichever report the classifier chose.
+  const out: string[] = ['where every account stands right now:', await balances(db, accounts, today), ''];
+  for (const a of accounts) {
+    const anchor = await db.latestSnapshot(a.id);
+    if (!anchor) {
+      out.push(`${a.id} (${a.name}): never anchored, so it has no balance, only a running total.`);
+      continue;
+    }
+    const rows = effective(await db.eventsSince(a.id, anchor.as_of_date)).filter(
+      (r) => r.account_id === a.id && dayDiff(anchor.as_of_date, r.occurred_at) > 0,
+    );
+    const rate =
+      a.rate > 0
+        ? ` rate ${(a.rate * 100).toFixed(2)}% net${a.rate_source === 'seeded_net' ? ', still the seeded estimate (est), never yet learned from a real credit' : ', learned from real credits'}.`
+        : ' earns no interest.';
+    out.push(
+      `${a.id} (${a.name}): anchored ${peso(anchor.balance_centavos)} on ${anchor.as_of_date}, ${dayDiff(anchor.as_of_date, today)}d ago.${rate}`,
+    );
+    // Only what is NOT in the anchor. Rows dated on or before it are inside that reading
+    // already, and listing them is how you get told the same peso twice.
+    for (const r of rows.slice(-FACT_ROWS)) {
+      const bits = [r.occurred_at, r.type, peso(r.amount_centavos), r.merchant, r.category, r.note];
+      out.push(`  since the anchor: ${bits.filter(Boolean).join(' · ')}`);
+    }
+    if (!rows.length) out.push('  since the anchor: nothing logged.');
+  }
+  return out.join('\n');
+}
+
+/**
  * What is left in an account, as one line: the closing statement on every reply that moved
  * money. The question you have after spending is "how much is left", and answering it in
  * the same breath is a round trip to /balance you no longer make.

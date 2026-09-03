@@ -307,6 +307,7 @@ test('a natural-language anchor writes nothing until confirmed', async () => {
     new_account: null,
     new_account_book: null,
     reply: null,
+    ask: null,
   };
 
   const proposal = await applyEvent(
@@ -373,6 +374,7 @@ test('a spoken question is answered, not redirected to a slash command', async (
       new_account: null,
       new_account_book: null,
       reply: null,
+      ask: null,
     },
     { inboxId: 1, today: '2026-09-03', hadPhoto: false },
   );
@@ -519,6 +521,7 @@ const spokenEvent = (p: Partial<Extracted>): Extracted => ({
   new_account: null,
   new_account_book: null,
   reply: null,
+  ask: null,
   ...p,
 });
 
@@ -861,6 +864,61 @@ test('an empty day is simply empty', async () => {
   const quiet = (await runCommand(db, await db.accounts(), '/recap', '2026-09-03'))!.text;
   assert.match(quiet, /nothing logged/);
   assert.match(quiet, /spent\s+₱0\.00/);
+});
+
+test('a question about the numbers gets the table AND an answer, and never loses the table', async () => {
+  // The gap this closes: every spoken question was routed to the nearest report, so asking
+  // "did my interest get added?" printed the same balance table you were already looking at.
+  // The table is still the authoritative half and still goes first — the prose is appended
+  // under it, so a model that paraphrases a figure badly is contradicted in the same message.
+  const db = await fresh();
+  const accounts = await db.accounts();
+  await anchorAccount(
+    db,
+    accounts.find((a) => a.id === 'maya')!,
+    10_294_025,
+    '2026-09-03',
+  );
+
+  const real = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls++;
+    return new Response(
+      JSON.stringify({ choices: [{ message: { content: 'Yes, it is already in there.' } }] }),
+      {
+        headers: { 'content-type': 'application/json' },
+      },
+    );
+  }) as typeof fetch;
+
+  try {
+    const ctx = { inboxId: 1, today: '2026-09-04', hadPhoto: false, groqKey: 'k' };
+    const q = { intent: 'query' as const, query_kind: 'balance' as const };
+
+    const asked = await applyEvent(db, accounts, spokenEvent({ ...q, ask: 'is my interest in there?' }), ctx);
+    assert.match(asked.text, /Maya Savings/, 'the report must survive');
+    assert.match(asked.text, /Yes, it is already in there\./, 'and carry the answer under it');
+    assert.equal(calls, 1);
+
+    // A bare request for a report spends nothing and appends nothing: the table IS the answer,
+    // and prose after it would be noise on the path that already worked.
+    const bare = await applyEvent(db, accounts, spokenEvent(q), ctx);
+    assert.doesNotMatch(bare.text, /Yes, it is already in there\./);
+    assert.equal(calls, 1, 'a bare report must not cost a second call');
+
+    // Groq down, rate-limited or slow must never cost the answer actually asked for.
+    globalThis.fetch = (async () => new Response('rate limited', { status: 429 })) as typeof fetch;
+    const degraded = await applyEvent(
+      db,
+      accounts,
+      spokenEvent({ ...q, ask: 'is my interest in there?' }),
+      ctx,
+    );
+    assert.match(degraded.text, /Maya Savings/, 'the report still sends, unexplained');
+  } finally {
+    globalThis.fetch = real;
+  }
 });
 
 test('a credit reported on the anchor day reaches the balance, once', async () => {
