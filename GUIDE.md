@@ -148,10 +148,40 @@ You can type these as commands or just say them.
 | you say                            | you get                           |
 | ---------------------------------- | --------------------------------- |
 | `/balance` or "how much do I have" | every account, per book           |
-| `/recap` or "how much did I spend" | this month by category            |
-| `/recap 2026-08`                   | a past month                      |
+| `/recap` or "what did I spend"     | today, itemised                   |
+| `/recap week`                      | Monday to today, grouped by day   |
+| `/recap month` or `/recap 2026-08` | a whole month, by category        |
 | `/owed` or "who owes me"           | money you fronted                 |
 | `/csv`                             | the whole ledger as a spreadsheet |
+
+### Reading `/recap`
+
+```
+/recap                  today, itemised          ← the default
+/recap yesterday        yesterday, itemised
+/recap 2026-09-03       one particular day
+/recap week             Monday to today, grouped by day with a subtotal each
+/recap month            this month, by category
+/recap 2026-08          a past month, by category
+/recap month list       a month as individual rows instead
+```
+
+**The window decides the shape, not a flag.** A day is a handful of rows, so the rows _are_
+the recap — category totals over three items summarise something you can already see. A month
+is hundreds of rows, so categories are the only readable form. `list` overrides it when you
+want the rows anyway, capped at 40 with a `/csv` pointer.
+
+**A week starts on Monday** and runs to today, not to Sunday — days that have not happened
+are not a recap. It crosses a month boundary happily: on Thursday 3 September the week opened
+on Monday 31 August, and those two days of August are in it.
+
+**Voided rows never appear**, in any window, and a corrected row appears once at its
+corrected amount — never as both the old and the new figure. `/csv` is the exception, on
+purpose: it is the audit trail and the exit path, so it keeps everything and carries a
+`voided` column you can filter on.
+
+**A shared expense counts only your share**, with the rest named on the line, because that is
+why the number differs from the receipt in your pocket.
 
 ### Reading `/balance`
 
@@ -314,7 +344,7 @@ every projection the account will ever make.
 ## Month end
 
 ```
-/recap
+/recap month
 ```
 
 Nothing else is required. There is no close, no lock, no ritual — the ledger is append-only,

@@ -165,6 +165,10 @@ then exceeds twice the new reference and is rejected forever.
   a reminder is the whole mechanism: Tala does not know which transactions Maya counts, and
   a progress bar that reads "qualified" when you are not is worse than none in an app whose
   thesis is that an untagged number misleads.
+- **A recap's shape is chosen by its window length**, not by a flag: items for a day and a
+  week, categories for a month, and `list` to override. The judgement being encoded is that
+  three items need no summary and three hundred rows are unreadable in a chat. `MAX_ITEMS` is
+  40, after which `/csv` is the right tool and the recap says so.
 - **A reminder is a preference, not a ledger fact**, so all of them live in one JSON row in
   `settings` — no table, no migration. That is not laziness: `schema.sql` has no
   `IF NOT EXISTS` and only ever runs against an empty database, so a table declared there

@@ -33,6 +33,7 @@ import {
   peso,
   reminderDue,
   spendByCategory,
+  startOfWeek,
   sum,
   unsettled,
   type Event,
@@ -664,4 +665,14 @@ test('a day that cannot be read is never due, rather than due every day', () => 
   for (const junk of ['', 'someday', '0', '32', '-1', '2.5']) {
     assert.equal(reminderDue(junk, '2026-09-01'), false, junk);
   }
+});
+
+test('a week starts on Monday, and crossing a month does not restart it', () => {
+  // 2026-09-03 is a Thursday, so its week opened on Monday 2026-08-31 — in the previous
+  // month. A week that clamped to the 1st would silently drop the days you spent on.
+  assert.equal(startOfWeek('2026-09-03'), '2026-08-31');
+  assert.equal(startOfWeek('2026-08-31'), '2026-08-31', 'Monday is its own start');
+  assert.equal(startOfWeek('2026-09-06'), '2026-08-31', 'Sunday belongs to the week that opened');
+  assert.equal(startOfWeek('2026-09-07'), '2026-09-07', 'and the next Monday opens a new one');
+  assert.equal(startOfWeek('2026-01-01'), '2025-12-29', 'across a year boundary too');
 });

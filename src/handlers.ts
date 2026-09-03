@@ -55,8 +55,14 @@ export async function applyEvent(
       // The extractor already classified this, so honour it. A query is read-only: there is
       // no correctness argument for making you remember a slash command to ask a question.
       const kind = e.query_kind ?? 'balance';
+      // The period rides along for a recap. Without it "how much did I spend this month"
+      // and "what did I spend today" both reach a bare /recap, which answers for today —
+      // so the spoken path would silently be able to ask only one of the two questions.
+      const period = kind === 'recap' && e.date_hint ? ` ${e.date_hint}` : '';
       return (
-        (await runCommand(db, accounts, `/${kind}`, ctx.today)) ?? { text: 'Ask me /balance or /recap.' }
+        (await runCommand(db, accounts, `/${kind}${period}`, ctx.today)) ?? {
+          text: 'Ask me /balance or /recap.',
+        }
       );
     }
     default:
@@ -166,7 +172,7 @@ export async function callback(db: Db, data: string, today: string): Promise<Cal
  */
 export const COMMANDS = [
   { name: 'balance', args: '', help: 'confirmed vs expected, per book' },
-  { name: 'recap', args: '[YYYY-MM]', help: 'this month, or a past one' },
+  { name: 'recap', args: '[today|week|month|YYYY-MM-DD] [list]', help: 'what you spent, itemised' },
   { name: 'snap', args: '<account> <amount>', help: 'anchor a real balance from your banking app' },
   { name: 'interest', args: '[<account> <amount> [date]]', help: 'what you have earned, or report a credit' },
   { name: 'rate', args: '[account] [10% gross]', help: 'see rates, or set one' },
@@ -262,7 +268,7 @@ export async function runCommand(
     case 'balance':
       return { text: (await firstRun(db, accounts)) ?? (await balances(db, accounts, today)) };
     case 'recap':
-      return { text: await recap(db, rest[0] || today.slice(0, 7)) };
+      return { text: await recap(db, arg, today) };
     case 'snap':
     case 'snapshot':
       return snapshot(db, accounts, arg, today);

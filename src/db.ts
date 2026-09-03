@@ -240,8 +240,13 @@ export class Db {
     ]);
   }
 
-  eventsInMonth(month: string): Promise<Event[]> {
-    return this.all<Event>(`SELECT * FROM events WHERE occurred_at LIKE ? ORDER BY id`, [`${month}%`]);
+  /**
+   * Every row in an inclusive Manila-date range. Replaced a month-only prefix LIKE: a day
+   * and a month were expressible as prefixes but a WEEK was not, and two query shapes for
+   * one question is how a recap's windows drift apart.
+   */
+  eventsBetween(from: string, to: string): Promise<Event[]> {
+    return this.all<Event>('SELECT * FROM events WHERE occurred_at BETWEEN ? AND ? ORDER BY id', [from, to]);
   }
 
   allEvents(): Promise<Event[]> {

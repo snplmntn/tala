@@ -720,3 +720,116 @@ test('reminder text cannot smuggle a monospace marker into the daily line', asyn
   const [row] = await dueReminders(db, ['2026-09-30']);
   assert.equal(row.text, '<b>hi</b>', 'the marker is stripped; the tags stay inert text');
 });
+
+// -- recap windows -----------------------------------------------------------
+
+const anExpense = (db: Db, o: Record<string, unknown>) =>
+  db.run(
+    `INSERT INTO events (type, book, account_id, amount_centavos, category, merchant,
+       shared_amount_centavos, occurred_at, logged_at, corrects_id, voided_at)
+     VALUES ('expense','personal','maribank',?,?,?,?,?,?,?,?)`,
+    [
+      o.amt as number,
+      (o.cat as string) ?? null,
+      (o.merch as string) ?? null,
+      (o.shared as number) ?? null,
+      o.date as string,
+      `${o.date as string}T02:00:00Z`,
+      (o.corrects as number) ?? null,
+      (o.voided as string) ?? null,
+    ],
+  );
+
+async function aWeekOfSpending(): Promise<Db> {
+  const db = await fresh();
+  await anExpense(db, { date: '2026-08-31', amt: -28500, cat: 'food', merch: 'jollibee' });
+  await anExpense(db, { date: '2026-09-01', amt: -1500, cat: 'transport', merch: 'jeep' });
+  await anExpense(db, { date: '2026-09-03', amt: -60000, cat: 'food', merch: 'ramen nagi', shared: 40000 });
+  await anExpense(db, {
+    date: '2026-09-03',
+    amt: -99900,
+    cat: 'shopping',
+    merch: 'oops duplicate',
+    voided: '2026-09-03T05:00:00Z',
+  });
+  const root = await anExpense(db, { date: '2026-09-03', amt: -25000, cat: 'food', merch: 'starbucks' });
+  await anExpense(db, { date: '2026-09-03', amt: -28500, cat: 'food', merch: 'starbucks', corrects: root });
+  return db;
+}
+
+test('recap defaults to today and itemises it', async () => {
+  // A day is a handful of rows, so the rows ARE the recap — category totals over three
+  // items is a summary of something already visible.
+  const db = await aWeekOfSpending();
+  const text = (await runCommand(db, await db.accounts(), '/recap', '2026-09-03'))!.text;
+  assert.match(text, /Thu 2026-09-03/);
+  assert.match(text, /ramen nagi/);
+  assert.match(text, /starbucks/);
+  assert.doesNotMatch(text, /jollibee/, 'a different day is not in it');
+});
+
+test('a voided row is not shown and a corrected one is shown once', async () => {
+  const db = await aWeekOfSpending();
+  const text = (await runCommand(db, await db.accounts(), '/recap', '2026-09-03'))!.text;
+  assert.doesNotMatch(text, /oops duplicate/, 'voided rows are gone from every view');
+  assert.doesNotMatch(text, /250\.00/, 'the superseded amount never appears');
+  assert.match(text, /285\.00/, 'the corrected amount does');
+  // 200 (your half of the ramen) + 285 (the corrected starbucks) = 485.
+  assert.match(text, /spent\s+₱485\.00/);
+});
+
+test('a shared expense counts only your share, and says whose the rest was', async () => {
+  const db = await aWeekOfSpending();
+  const text = (await runCommand(db, await db.accounts(), '/recap', '2026-09-03'))!.text;
+  assert.match(text, /ramen nagi\s+₱200\.00\s+\(₱400\.00 not yours\)/);
+});
+
+test('a week runs Monday to today and groups by day, across a month boundary', async () => {
+  const db = await aWeekOfSpending();
+  const text = (await runCommand(db, await db.accounts(), '/recap week', '2026-09-03'))!.text;
+  assert.match(text, /week of 2026-08-31/, 'Thursday belongs to the week that opened in August');
+  assert.match(text, /Mon 2026-08-31/);
+  assert.match(text, /Tue 2026-09-01/);
+  assert.match(text, /jollibee/, 'and August 31st is in it');
+  // 285 + 15 + 200 + 285
+  assert.match(text, /spent\s+₱785\.00/);
+});
+
+test('a month totals by category, and `list` asks for the rows instead', async () => {
+  const db = await aWeekOfSpending();
+  const accounts = await db.accounts();
+  const totals = (await runCommand(db, accounts, '/recap month', '2026-09-03'))!.text;
+  assert.match(totals, /food\s+₱485\.00/);
+  assert.match(totals, /transport\s+₱15\.00/);
+  assert.doesNotMatch(totals, /starbucks/, 'a month of items is not readable in a chat');
+
+  const items = (await runCommand(db, accounts, '/recap month list', '2026-09-03'))!.text;
+  assert.match(items, /starbucks/);
+  assert.doesNotMatch(items, /food\s+₱485/, 'one shape or the other, never both');
+});
+
+test('recap says what it could not read, rather than answering for the wrong period', async () => {
+  const db = await fresh();
+  const accounts = await db.accounts();
+  assert.match(
+    (await runCommand(db, accounts, '/recap someday', '2026-09-03'))!.text,
+    /Couldn.t read "someday"/,
+  );
+  // "this week" and "week" are the same thing: the spoken path sends whichever was heard.
+  const spoken = (await runCommand(db, accounts, '/recap this week', '2026-09-03'))!.text;
+  assert.match(spoken, /week of 2026-08-31/);
+});
+
+test('an empty day distinguishes "nothing spent" from "the anchor already has it"', async () => {
+  // The one way a day can look empty when it is not: an anchor read today already contains
+  // today's spending, so a same-day expense books to tomorrow rather than netting to zero.
+  const db = await fresh();
+  const accounts = await db.accounts();
+  const quiet = (await runCommand(db, accounts, '/recap', '2026-09-03'))!.text;
+  assert.match(quiet, /nothing logged/);
+  assert.doesNotMatch(quiet, /books to the next day/);
+
+  await runCommand(db, accounts, '/snap maribank 50000', '2026-09-04');
+  const anchored = (await runCommand(db, accounts, '/recap', '2026-09-04'))!.text;
+  assert.match(anchored, /books to the next day/, 'never let it read as a lost entry');
+});

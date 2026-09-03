@@ -110,6 +110,15 @@ export function lastDayOfMonth(date: string): number {
 export const WEEKDAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'] as const;
 
 /**
+ * The Monday that starts this date's week.
+ *
+ * Monday, not Sunday: "this week" for spending means the working week you are inside, and a
+ * Sunday start puts the weekend that just happened at the TOP of a list you are reading to
+ * find out what you spent since Monday. One constant to flip if that is ever wrong.
+ */
+export const startOfWeek = (date: string): string => addDays(date, -((weekdayOf(date) + 6) % 7));
+
+/**
  * Is a reminder due on this Manila civil date?
  *
  * `when` is one of: 'som' (the 1st), 'eom' (the last day, whatever it is), a weekday
@@ -609,14 +618,22 @@ export function unsettled(rows: Event[]): number {
     .reduce((t, r) => t + (r.shared_amount_centavos ?? 0), 0);
 }
 
+/**
+ * The part of an expense that is actually your money, as a positive spend figure.
+ *
+ * One expression, shared by the category totals and the itemised list, because two copies
+ * of "subtract the shared portion" is how a recap's items stop adding up to its own total.
+ * A refund is a positive-signed expense row, so this comes out negative and nets.
+ */
+export const yours = (r: Event): number => -r.amount_centavos - (r.shared_amount_centavos ?? 0);
+
 /** Spend per category over effective rows, net of refunds and of other people's money. */
 export function spendByCategory(rows: Event[]): Map<string, number> {
   const out = new Map<string, number>();
   for (const r of effective(rows)) {
     if (r.type !== 'expense') continue;
-    const mine = -r.amount_centavos - (r.shared_amount_centavos ?? 0);
     const key = r.category ?? 'other';
-    out.set(key, (out.get(key) ?? 0) + mine);
+    out.set(key, (out.get(key) ?? 0) + yours(r));
   }
   return out;
 }

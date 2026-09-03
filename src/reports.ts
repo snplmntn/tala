@@ -9,6 +9,7 @@
 import { Db, type Account, type Write } from './db.ts';
 import { resolveDate } from './extract.ts';
 import {
+  WEEKDAYS,
   accrue,
   addDays,
   balanceOf,
@@ -17,13 +18,18 @@ import {
   effective,
   flowsByDate,
   foldFrom,
+  lastDayOfMonth,
   learnRate,
+  monthOf,
   parseAmount,
   parseRate,
   peso,
   spendByCategory,
+  startOfWeek,
   sum,
   unsettled,
+  weekdayOf,
+  yours,
   type Event,
 } from './ledger.ts';
 import { acct, nowIso, type Reply } from './reply.ts';
@@ -96,35 +102,143 @@ export async function balances(db: Db, accounts: Account[], today: string): Prom
   return out.join('\n');
 }
 
-export async function recap(db: Db, month: string): Promise<string> {
-  const rows = await db.eventsInMonth(month);
+/**
+ * What a recap shows is decided by HOW LONG the window is, not by a flag.
+ *
+ * A day is a handful of rows, so the rows ARE the recap — category totals over four items
+ * is a summary of something you can already see. A month is hundreds, so categories are the
+ * only readable shape. A week sits in between and gets the rows grouped by day, which is
+ * what answers "which day did I overspend" without a second command. `list` overrides it.
+ */
+interface Window {
+  from: string;
+  to: string;
+  label: string;
+  items: boolean;
+  byDay: boolean;
+}
+
+/** A cap, not a page: past this the rows stop being readable and /csv is the right tool. */
+const MAX_ITEMS = 40;
+
+const DAY_NAME = (d: string) => {
+  const w = WEEKDAYS[weekdayOf(d)];
+  return `${w[0].toUpperCase()}${w.slice(1)}`;
+};
+
+/** Returns a window, or the sentence to say instead. */
+function recapWindow(arg: string, today: string): Window | string {
+  // "this" is dropped so "this week" and "week" are the same thing — the spoken path sends
+  // whichever the model heard, and re-asking over a filler word is how a bot feels like a form.
+  const parts = arg
+    .trim()
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((w) => w && w !== 'this');
+  const force = parts.includes('list') || parts.includes('all');
+  const word = parts.find((w) => w !== 'list' && w !== 'all');
+  const day = (d: string): Window => ({
+    from: d,
+    to: d,
+    label: `${DAY_NAME(d)} ${d}`,
+    items: true,
+    byDay: false,
+  });
+
+  if (!word || word === 'today') return day(today);
+  if (word === 'yesterday') return day(addDays(today, -1));
+  if (word === 'week') {
+    // Monday to TODAY, not Monday to Sunday: days that have not happened are not a recap.
+    const from = startOfWeek(today);
+    return { from, to: today, label: `week of ${from}`, items: true, byDay: true };
+  }
+  if (word === 'month' || /^\d{4}-\d{2}$/.test(word)) {
+    const m = word === 'month' ? monthOf(today) : word;
+    return { from: `${m}-01`, to: `${m}-${lastDayOfMonth(`${m}-01`)}`, label: m, items: force, byDay: false };
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(word)) return day(word);
+  return `Couldn't read "${word}". Try /recap, /recap week, /recap month, or /recap 2026-08.`;
+}
+
+/**
+ * The recap. Defaults to TODAY, because the question you ask most is what today cost you —
+ * a month is a thing you review, a day is a thing you check.
+ *
+ * Reads through `effective()` throughout, so a voided row is not shown and a corrected one
+ * is shown ONCE at its corrected amount. Nothing here is a raw SELECT of what was typed.
+ */
+export async function recap(db: Db, arg: string, today: string): Promise<string> {
+  const w = recapWindow(arg, today);
+  if (typeof w === 'string') return w;
+
+  const rows = await db.eventsBetween(w.from, w.to);
   const personal = rows.filter((r) => r.book === 'personal');
+  const live = effective(personal);
+  const expenses = live
+    .filter((r) => r.type === 'expense')
+    .sort((a, b) => a.occurred_at.localeCompare(b.occurred_at) || a.id - b.id);
+
   const cats = [...spendByCategory(personal)].sort((a, b) => b[1] - a[1]);
   const spend = cats.reduce((t, [, v]) => t + v, 0);
-  const income = sum(effective(personal).filter((r) => r.type === 'income'));
-  const earned = sum(effective(personal).filter((r) => r.type === 'interest' || r.type === 'cashback'));
+  const income = sum(live.filter((r) => r.type === 'income'));
+  const earned = sum(live.filter((r) => r.type === 'interest' || r.type === 'cashback'));
   const contributed = sum(
     effective(rows).filter((r) => r.type === 'transfer' && r.book === 'business' && r.amount_centavos > 0),
   );
 
-  const out = [`${month} · personal`];
-  for (const [c, v] of cats) out.push(`  ${c.padEnd(14)} ${peso(v).padStart(11)}`);
-  out.push(
-    `  ${'spent'.padEnd(14)} ${peso(spend).padStart(11)}`,
-    `  ${'income'.padEnd(14)} ${peso(income).padStart(11)}`,
-  );
-  out.push(`  ${'net'.padEnd(14)} ${peso(income - spend).padStart(11)}`);
-  if (earned) out.push(`  ${'interest'.padEnd(14)} ${peso(earned).padStart(11)}`);
+  const out = [`${w.label} · personal`];
+  const row = (label: string, amount: number, tail = '') =>
+    `  ${label.slice(0, 15).padEnd(15)} ${peso(amount).padStart(11)}${tail}`;
+
+  if (w.items && expenses.length) {
+    const shown = expenses.slice(0, MAX_ITEMS);
+    let day = '';
+    for (const r of shown) {
+      if (w.byDay && r.occurred_at !== day) {
+        day = r.occurred_at;
+        const total = expenses.filter((x) => x.occurred_at === day).reduce((t, x) => t + yours(x), 0);
+        // Padded to 20 so the day's subtotal lands in the same column as its items: an
+        // indented item is 2 + row()'s own 2 + 15 + 1, and the amount is the last 11.
+        out.push(`  ${`${DAY_NAME(day)} ${day}`.padEnd(18)}${peso(total).padStart(11)}`);
+      }
+      const name = r.merchant ?? r.note ?? r.category ?? 'expense';
+      // The shared portion is already out of the figure; saying so is why the number differs
+      // from the receipt in your pocket.
+      const tail = r.shared_amount_centavos ? `  (${peso(r.shared_amount_centavos)} not yours)` : '';
+      out.push(`${w.byDay ? '  ' : ''}${row(name, yours(r), tail)}`);
+    }
+    if (expenses.length > shown.length) out.push(`  +${expenses.length - shown.length} more · /csv`);
+    out.push('');
+  } else if (!w.items && cats.length) {
+    for (const [c, v] of cats) out.push(row(c, v));
+    out.push('');
+  }
+
+  if (!expenses.length) out.push('  nothing logged');
+  out.push(row('spent', spend), row('income', income), row('net', income - spend));
+  if (earned) out.push(row('interest', earned));
   if (contributed) {
     // Separately these two mislead. Together they are the number that decides solvency.
     out.push(
       '',
-      `contributed ${peso(contributed)} to the business — buffer moving ${peso(income - spend - contributed)}/mo`,
+      `contributed ${peso(contributed)} to the business — buffer moving ${peso(income - spend - contributed)}`,
     );
   }
   const owed = unsettled(rows);
   if (owed > 0) out.push('', `owed to you: ${peso(owed)}`);
-  return mono(out.join('\n'));
+
+  const text = mono(out.join('\n'));
+
+  // The one way a day can look empty when it is not. An anchor read today already contains
+  // today's spending, so a same-day expense books to TOMORROW rather than netting to zero
+  // against the figure you just typed — see ledger.bookingDate. Said plainly, because "the
+  // bot lost my entry" is the worst thing this app can imply.
+  if (w.from === w.to && !expenses.length) {
+    const anchored = await db.one('SELECT 1 FROM snapshots WHERE as_of_date = ?', [w.from]);
+    if (anchored)
+      return `${text}\nYou anchored on ${w.from}, so anything spent after that reading books to the next day — it shows in /recap ${addDays(w.from, 1)}.`;
+  }
+  return text;
 }
 
 /** The laziest possible answer to every future "can it show me X?". */
