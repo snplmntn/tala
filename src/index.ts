@@ -69,6 +69,7 @@ const db = new Db(env('TURSO_URL'), env('TURSO_TOKEN'));
 
 const today = () => manilaDate(new Date());
 const log = (...a: unknown[]) => console.log(new Date().toISOString(), ...a);
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
  * What was just said, so a follow-up is an answer rather than a fresh sentence.
@@ -98,7 +99,8 @@ const authorised = (u: Update): boolean => senderId(u) === OWNER;
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function handle(u: Update): Promise<void> {
+/** Returns true if this update cost an extraction call — the drain below paces on it. */
+async function handle(u: Update): Promise<boolean> {
   if (!authorised(u)) {
     const id = senderId(u);
     if (PAIRING && id != null) {
@@ -111,10 +113,10 @@ async function handle(u: Update): Promise<void> {
         id,
         `Your chat id is ${id}\n\nSet OWNER_CHAT_ID=${id} and restart. Until then I ignore everything.`,
       );
-      return;
+      return false;
     }
     log('ignored update from', id);
-    return;
+    return false;
   }
 
   if (u.callback_query) {
@@ -124,23 +126,23 @@ async function handle(u: Update): Promise<void> {
     // and the chat gets the answer. Telegram caps it at 200 characters and silently fails
     // the whole call above that, which is how a multi-line anchor result became no result.
     await answerCallback(TOKEN, q.id, r.text.split('\n')[0].slice(0, 200));
-    if (r.advice || !q.message) return;
+    if (r.advice || !q.message) return false;
     // The question has been answered: its buttons stop existing, and the outcome is posted
     // as a message so the chat holds a record of it rather than a prompt that never resolved.
     await clearKeyboard(TOKEN, q.message.chat.id, q.message.message_id);
     await send(TOKEN, q.message.chat.id, r.text, r.keyboard);
     history.add('assistant', r.text);
-    return;
+    return false;
   }
 
   const m = u.message ?? u.edited_message;
-  if (!m) return;
+  if (!m) return false;
 
   // A `document` ships original bytes with home and campus GPS intact. Telegram re-encodes
   // `photo`, which is what strips EXIF, so only photos are accepted.
   if (m.document) {
     await send(TOKEN, m.chat.id, 'Send receipts as a photo, not a file — a file keeps its GPS metadata.');
-    return;
+    return false;
   }
 
   const text = (m.text ?? m.caption ?? '').trim();
@@ -157,7 +159,7 @@ async function handle(u: Update): Promise<void> {
       } else {
         await send(TOKEN, m.chat.id, reply.text, reply.keyboard);
       }
-      return;
+      return false;
     }
   }
 
@@ -173,7 +175,7 @@ async function handle(u: Update): Promise<void> {
   });
   if (inboxId == null) {
     log('duplicate update', u.update_id);
-    return;
+    return false;
   }
 
   const accounts = await db.accounts();
@@ -195,7 +197,7 @@ async function handle(u: Update): Promise<void> {
       m.chat.id,
       `Saved your message but couldn't read it yet (${String(e).slice(0, 80)}). It will be retried — nothing is lost.`,
     );
-    return;
+    return true; // the call was made and the quota spent, so the drain still paces
   }
 
   history.add('user', hasPhoto ? `${text} (sent a receipt photo)`.trim() : text);
@@ -210,6 +212,7 @@ async function handle(u: Update): Promise<void> {
     history.add('assistant', r.text);
   }
   await db.markInbox(inboxId, 'applied');
+  return true;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -310,6 +313,24 @@ function scheduler(): void {
 // The loop.
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * How long to wait between two messages that both need the extractor.
+ *
+ * This only ever fires while draining a BACKLOG — everything Telegram held while the service
+ * was asleep, redeploying or unreachable — because a single message has nothing after it to
+ * pace against.
+ *
+ * Without it the drain fires every queued message at once, and Groq's free tier caps at 8,000
+ * tokens per MINUTE against a prompt of roughly 1.8k, so about the fifth call 429s and the
+ * rest defer. Nothing is lost, but the ORDER is: a reply that answers the bot's own question
+ * ("maribank", right after being asked which account) gets parsed with its question missing
+ * from the transcript, and comes out as something else entirely.
+ *
+ * retryDeferred already paces for exactly this reason — see RETRY_PER_TICK. The cold-start
+ * drain is the larger burst and simply never got the same treatment.
+ */
+const PACE_MS = 14_000;
+
 async function poll(): Promise<never> {
   // The offset comes from the ledger itself: max(telegram_update_id) + 1. No extra table,
   // and a restart resumes exactly where it left off rather than replaying a day.
@@ -337,10 +358,11 @@ async function poll(): Promise<never> {
     try {
       const updates = await getUpdates(TOKEN, offset);
       backoff = 1000;
-      for (const u of updates) {
+      for (const [i, u] of updates.entries()) {
         offset = Math.max(offset, u.update_id + 1);
+        let spentACall = false;
         try {
-          await handle(u);
+          spentACall = await handle(u);
         } catch (e) {
           // A DM is the error tracker. Nobody opens a hosting dashboard for a personal bot.
           log('handle', u.update_id, e);
@@ -348,10 +370,15 @@ async function poll(): Promise<never> {
             () => {},
           );
         }
+        // Only ever between messages, so ordinary one-at-a-time typing waits for nothing.
+        if (spentACall && i < updates.length - 1) {
+          log('pacing the backlog,', updates.length - i - 1, 'left');
+          await sleep(PACE_MS);
+        }
       }
     } catch (e) {
       log('poll', String(e).slice(0, 200));
-      await new Promise((r) => setTimeout(r, backoff));
+      await sleep(backoff);
       backoff = Math.min(backoff * 2, 60_000);
     }
   }
@@ -410,6 +437,6 @@ for (;;) {
   } catch (e) {
     log('poll loop died, restarting in 10s:', String(e).slice(0, 300));
     await send(TOKEN, OWNER, `Tala restarted its poll loop: ${String(e).slice(0, 200)}`).catch(() => {});
-    await new Promise((r) => setTimeout(r, 10_000));
+    await sleep(10_000);
   }
 }
