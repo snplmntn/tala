@@ -25,7 +25,9 @@ import {
   callback,
   dropFired,
   dueReminders,
+  dueTimed,
   runCommand,
+  tableAnswers,
 } from '../src/handlers.ts';
 import type { Extracted } from '../src/extract.ts';
 
@@ -718,6 +720,63 @@ test('a reminder that came due while the process was down still fires, late', as
     ['renew the domain'],
     'the catch-up window covers the days that were missed',
   );
+});
+
+test('a reminder can name an exact time, and fires from the minute tick instead', async () => {
+  const db = await fresh();
+  const accounts = await db.accounts();
+  const cmd = (line: string, today = '2026-09-25') => runCommand(db, accounts, line, today);
+
+  assert.match((await cmd('/remind 25 17:00 pay the bill'))!.text, /day 25 at 17:00, once/);
+  assert.match((await cmd('/remind every mon 9:30pm meds'))!.text, /Mon at 21:30, every/);
+  assert.match((await cmd('/remind'))!.text, /17:00/);
+
+  // A number that is not written like a time stays part of the text, so the reminder is
+  // about the bill rather than silently rescheduled to 09:00.
+  assert.match((await cmd('/remind 25 9 internet bill'))!.text, /^⏰ 9 internet bill/);
+
+  // The daily line must not carry a timed row: two carriers, one reminder each.
+  assert.deepEqual(
+    (await dueReminders(db, ['2026-09-25'])).map((r) => r.text),
+    ['9 internet bill'],
+  );
+
+  // The window is (scan, now]: due once, then never again from an advanced marker.
+  const before = '2026-09-25T08:59:00.000Z'; // 16:59 Manila
+  const after = '2026-09-25T09:01:00.000Z'; // 17:01 Manila
+  assert.deepEqual(
+    (await dueTimed(db, before, after)).map((r) => r.text),
+    ['pay the bill'],
+  );
+  assert.deepEqual(await dueTimed(db, after, '2026-09-25T09:02:00.000Z'), [], 'not fired twice');
+
+  // Down over the slot, back two hours later: late, not lost.
+  assert.deepEqual(
+    (await dueTimed(db, before, '2026-09-25T11:00:00.000Z')).map((r) => r.text),
+    ['pay the bill'],
+  );
+
+  // A one-off retires on firing; the repeating 21:30 one comes round the next Monday.
+  await dropFired(db, await dueTimed(db, before, after));
+  assert.deepEqual(await dueTimed(db, before, after), []);
+  assert.deepEqual(
+    (await dueTimed(db, '2026-09-28T13:29:00.000Z', '2026-09-28T13:31:00.000Z')).map((r) => r.text),
+    ['meds'],
+    'Monday 21:30 Manila',
+  );
+});
+
+test('a question the report already answers gets no prose under it', () => {
+  // The bug: "how much did i spend yday" reached answer(), which then hedged about the
+  // ₱468.00 printed two lines above it. A dated, totalled table needs no paragraph.
+  assert.ok(tableAnswers('how much did i spend yday'));
+  assert.ok(tableAnswers('what did I spend on food this month'));
+  assert.ok(tableAnswers('how much do I have'));
+  // Questions ABOUT the numbers still get one.
+  assert.ok(!tableAnswers('did my interest get added to my balance?'));
+  assert.ok(!tableAnswers('why does maya still say est?'));
+  assert.ok(!tableAnswers('is that the whole day?'));
+  assert.ok(!tableAnswers('what does est mean'));
 });
 
 test('reminder text cannot smuggle a monospace marker into the daily line', async () => {

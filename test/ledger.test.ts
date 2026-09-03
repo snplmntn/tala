@@ -88,6 +88,17 @@ test('parseAmount reads what people actually type, and refuses what it cannot re
   assert.equal(parseAmount('1 2'), null);
   assert.equal(parseAmount('32 33'), null);
 
+  // "299 x 3" is three of the same thing. The extractor is forbidden from multiplying it,
+  // so this is the only place the arithmetic can live — and it is commutative, so the
+  // quantity may be written on either side.
+  assert.equal(parseAmount('299 x 3'), 89_700);
+  assert.equal(parseAmount('299*3'), 89_700);
+  assert.equal(parseAmount('3 x 299'), 89_700);
+  assert.equal(parseAmount('₱299 × 3'), 89_700);
+  assert.equal(parseAmount('2k x 3'), 600_000);
+  assert.equal(parseAmount('12.50 x 2'), 2_500);
+  assert.equal(parseAmount('a lot x 3'), null);
+
   // Refuse rather than guess: a silently wrong amount is indistinguishable from
   // forgotten spending once it lands in the drift row.
   assert.equal(parseAmount('a lot'), null);

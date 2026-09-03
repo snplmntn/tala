@@ -12,7 +12,17 @@
 
 import { Db, type Account } from './db.ts';
 import { answer, type Extracted, type Turn } from './extract.ts';
-import { WEEKDAYS, addDays, dayDiff, peso, reminderDue, unsettled, type Event } from './ledger.ts';
+import {
+  WEEKDAYS,
+  addDays,
+  dayDiff,
+  daysBetween,
+  manilaDate,
+  peso,
+  reminderDue,
+  unsettled,
+  type Event,
+} from './ledger.ts';
 import { correct, feeCmd, money, transfer, undo, voidWithSiblings } from './entries.ts';
 import { anchorAccount, proposeAnchor, snapshot } from './anchors.ts';
 import { balances, csv, interest, queryFacts, rates, recap, remaining, remainingFor } from './reports.ts';
@@ -97,6 +107,19 @@ export async function applyEvent(
  * Failure is silent by design. A model that is rate-limited, slow or down must never cost you
  * the answer you actually asked for, and the report is already complete without this.
  */
+/**
+ * True when the report IS the whole answer, so nothing gets appended to it.
+ *
+ * "how much did i spend yday" is a bare REQUEST wearing a question mark, and the extractor's
+ * did/was/is heuristic reads it as a follow-up — so a dated, totalled recap came back with a
+ * paragraph hedging about the figure printed two lines above it. The prompt now says this
+ * too, but the model decides in one place and code refuses in another: `ask` earns its LLM
+ * call only for a question ABOUT the numbers (why, how come, still, already, counted).
+ */
+export const tableAnswers = (ask: string): boolean =>
+  /^\s*(how much|how many|what|magkano)\b/i.test(ask) &&
+  !/\b(why|how come|still|already|includ\w*|counted|added|missing|est|mean|means)\b/i.test(ask);
+
 async function withAnswer(
   db: Db,
   accounts: Account[],
@@ -106,7 +129,7 @@ async function withAnswer(
 ): Promise<Reply> {
   // A bare "balance" or "recap" gets nothing appended: the table IS the answer, and prose
   // after it would be noise on the path that is already working.
-  if (!e.ask?.trim() || !ctx.groqKey || report.document) return report;
+  if (!e.ask?.trim() || tableAnswers(e.ask) || !ctx.groqKey || report.document) return report;
   try {
     const prose = await answer(ctx.groqKey, e.ask, report.text, await queryFacts(db, accounts, ctx.today), {
       today: ctx.today,
@@ -230,7 +253,11 @@ export const COMMANDS = [
   { name: 'rate', args: '[account] [10% gross]', help: 'see rates, or set one' },
   { name: 'owed', args: '', help: 'money you fronted that has not come back' },
   { name: 'account', args: '[add|off|on] …', help: 'list accounts, or open and close them' },
-  { name: 'remind', args: '[every] <day|mon-sun|som|eom> <text>', help: 'a nudge on the daily line' },
+  {
+    name: 'remind',
+    args: '[every] <day|mon-sun|som|eom> [HH:MM] <text>',
+    help: 'a nudge on the daily line, or at an exact time',
+  },
   { name: 'name', args: '[what to call you]', help: 'what Tala calls you' },
   { name: 'undo', args: '', help: 'void the last entry' },
   { name: 'csv', args: '', help: 'the whole ledger as a spreadsheet' },
@@ -420,7 +447,22 @@ export interface Reminder {
   text: string;
   /** Absent means ONE-OFF, which is the default: it deletes itself after it fires. */
   every?: boolean;
+  /**
+   * 'HH:MM' Manila, and the whole reason there are two carriers.
+   *
+   * Absent means the 08:00 daily line, which is right for anything you act on when you sit
+   * down. A bill that closes at 17:00 or a 21:00 medicine needs the minute it names, so a
+   * timed reminder rides the scheduler's minute tick instead — see dueTimed. The two sets
+   * are disjoint by construction (dueReminders drops every row that has an `at`), because a
+   * reminder that arrives twice is a reminder you learn to ignore.
+   */
+  at?: string;
 }
+
+/** The instant a Manila civil date and 'HH:MM' name, so a slot can be compared to a scan. */
+const slotAt = (date: string, at: string): string => new Date(`${date}T${at}:00+08:00`).toISOString();
+
+const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 const REMINDERS = 'reminders';
 // One settings row must not be able to become a wall in the morning message.
@@ -433,7 +475,11 @@ async function loadReminders(db: Db): Promise<Reminder[]> {
   try {
     const parsed: unknown = JSON.parse(raw);
     return Array.isArray(parsed)
-      ? parsed.filter((r): r is Reminder => typeof r?.when === 'string' && typeof r?.text === 'string')
+      ? parsed
+          .filter((r): r is Reminder => typeof r?.when === 'string' && typeof r?.text === 'string')
+          // A hand-edited time would reach slotAt as an Invalid Date and throw inside the
+          // scheduler. Demoted to the daily line instead: late is recoverable, silent is not.
+          .map((r) => (r.at && !HHMM.test(r.at) ? { ...r, at: undefined } : r))
       : [];
   } catch {
     // A hand-edited settings row must not be able to stop the daily line arriving.
@@ -443,7 +489,7 @@ async function loadReminders(db: Db): Promise<Reminder[]> {
 
 const saveReminders = (db: Db, rows: Reminder[]) => db.setSetting(REMINDERS, JSON.stringify(rows));
 
-const same = (a: Reminder, b: Reminder) => a.when === b.when && a.text === b.text;
+const same = (a: Reminder, b: Reminder) => a.when === b.when && a.text === b.text && a.at === b.at;
 
 /**
  * Everything due on any of `dates`. A LIST of dates, not one, because the daily line catches
@@ -452,7 +498,38 @@ const same = (a: Reminder, b: Reminder) => a.when === b.when && a.text === b.tex
  */
 export async function dueReminders(db: Db, dates: string[]): Promise<Reminder[]> {
   const all = await loadReminders(db);
-  return all.filter((r) => dates.some((d) => reminderDue(r.when, d)));
+  // Timed rows are excluded here and ONLY here: they have their own carrier, and a row in
+  // both sets fires twice on the day it comes round.
+  return all.filter((r) => !r.at && dates.some((d) => reminderDue(r.when, d)));
+}
+
+/** A month of catch-up, the same bound the daily line uses. Older than that is history. */
+const TIMED_CATCHUP_DAYS = 32;
+
+/**
+ * Everything with a clock time whose moment fell in `(scan, now]`.
+ *
+ * A WINDOW, not "is it 21:00 right now", because the tick is once a minute and the process
+ * is not always up: a scan marker that survives a restart turns a missed 21:00 into a 21:04
+ * reminder instead of a lost one, which is the same guarantee the daily line's date catch-up
+ * gives — off one settings key and no per-row bookkeeping. Exclusive on the left, so an
+ * advanced marker can never fire the same slot twice.
+ */
+export async function dueTimed(db: Db, scan: string, now: string): Promise<Reminder[]> {
+  const timed = (await loadReminders(db)).filter((r) => r.at);
+  if (!timed.length) return [];
+  // From the day BEFORE the scan: Manila is UTC+8, so an instant early in a UTC day belongs
+  // to a Manila date whose 00:00 slot is already behind it.
+  const dates = daysBetween(addDays(manilaDate(new Date(scan)), -1), manilaDate(new Date(now))).slice(
+    -TIMED_CATCHUP_DAYS,
+  );
+  return timed.filter((r) =>
+    dates.some((d) => {
+      if (!reminderDue(r.when, d)) return false;
+      const slot = slotAt(d, r.at!);
+      return slot > scan && slot <= now;
+    }),
+  );
 }
 
 /**
@@ -513,9 +590,36 @@ function parseWhen(raw: string): string | null {
   return Number.isInteger(n) && n >= 1 && n <= 31 ? String(n) : null;
 }
 
+/**
+ * "21:00", "9:30pm", "9pm" -> "21:00". Null for everything else, including a bare "9".
+ *
+ * The colon-or-meridiem requirement is what keeps the grammar unambiguous: the token after
+ * the day is optional, so without it `/remind 25 9 internet bill` could be 09:00 or a
+ * reminder that starts with the word 9 — and a bill reminder that fires at 09:00 instead of
+ * being about "9 internet bill" is the kind of wrong nobody notices until the bill is late.
+ */
+function parseAt(raw: string): string | null {
+  const w = raw.toLowerCase();
+  if (!/[:]|am$|pm$/.test(w)) return null;
+  const m = w.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/);
+  if (!m) return null;
+  let h = Number(m[1]);
+  const min = Number(m[2] ?? 0);
+  if (m[3]) {
+    if (h < 1 || h > 12) return null;
+    h = (h % 12) + (m[3] === 'pm' ? 12 : 0);
+  }
+  if (h > 23 || min > 59) return null;
+  return `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
+}
+
 /** Scanned forward rather than computed: exact for every clamp and weekday, and 8 lines shorter. */
-function nextFire(when: string, from: string): string | null {
-  for (let i = 1; i <= 366; i++) {
+function nextFire(when: string, from: string, at?: string): string | null {
+  // TODAY counts when a clock time is set and has not passed yet. Without this, "/remind 4
+  // 21:00" typed on the 4th at lunchtime confirms with next month's date while it is about
+  // to fire tonight, which reads as the reminder having been misfiled.
+  const start = at && reminderDue(when, from) && slotAt(from, at) > new Date().toISOString() ? 0 : 1;
+  for (let i = start; i <= 366; i++) {
     const d = addDays(from, i);
     if (reminderDue(when, d)) return d;
   }
@@ -527,6 +631,8 @@ const REMIND_USAGE = [
   '/remind every 25 internet bill  every month on the 25th',
   '/remind every fri water the plants',
   '/remind som review subscriptions',
+  '/remind 25 17:00 pay the bill   at 17:00 on the 25th, to the minute',
+  '/remind every mon 9:30pm meds   9:30pm and 21:30 both work',
   '/remind            list them',
   '/remind off 2      drop one',
 ].join('\n');
@@ -539,12 +645,13 @@ export async function remindCmd(db: Db, arg: string, today: string): Promise<Rep
     if (!list.length)
       return { text: ['Nothing set. They arrive with the daily line.', '', REMIND_USAGE].join('\n') };
     const lines = list.map((r, i) => {
-      const next = nextFire(r.when, today);
-      return `  ${String(i + 1).padEnd(3)} ${WHEN_LABEL(r.when).padEnd(13)} ${(r.every ? 'every' : 'once').padEnd(6)} ${next ?? ''}  ${r.text}`;
+      const next = nextFire(r.when, today, r.at);
+      const when = `${WHEN_LABEL(r.when)}${r.at ? ` ${r.at}` : ''}`;
+      return `  ${String(i + 1).padEnd(3)} ${when.padEnd(19)} ${(r.every ? 'every' : 'once').padEnd(6)} ${next ?? ''}  ${r.text}`;
     });
     return {
       text: [
-        'Reminders: they ride on the daily line, at 08:00 in Manila.',
+        'Reminders: 08:00 in Manila with the daily line, or at the exact time you set.',
         mono(lines.join('\n')),
         '/remind off <n> to drop one · /remind for the full syntax',
       ].join('\n'),
@@ -567,11 +674,14 @@ export async function remindCmd(db: Db, arg: string, today: string): Promise<Rep
     return {
       text: [`Couldn't read "${rest[0] ?? ''}" as a day.`, '', REMIND_USAGE].join('\n'),
     };
+  // Optional, and only ever the token straight after the day — see parseAt for why it has
+  // to look like a time rather than merely be a number.
+  const at = rest.length > 1 ? parseAt(rest[1]) : null;
 
   // Control characters stripped, not escaped: telegram.ts marks its monospace blocks with
   // them, so they are markup rather than something a reminder should be able to carry.
   const text = rest
-    .slice(1)
+    .slice(at ? 2 : 1)
     .join(' ')
     .replace(/[\u0000-\u0008]/g, '')
     .slice(0, MAX_TEXT);
@@ -579,11 +689,11 @@ export async function remindCmd(db: Db, arg: string, today: string): Promise<Rep
   if (list.length >= MAX_REMINDERS)
     return { text: `That is ${MAX_REMINDERS} reminders already. /remind off <n> to make room.` };
 
-  const row: Reminder = every ? { when, text, every: true } : { when, text };
+  const row: Reminder = { when, text, ...(every ? { every: true } : {}), ...(at ? { at } : {}) };
   await saveReminders(db, [...list, row]);
-  const next = nextFire(when, today);
+  const next = nextFire(when, today, at ?? undefined);
   return {
-    text: `⏰ ${text}\n${WHEN_LABEL(when)}${every ? ', every time it comes round' : ', once'}, next ${next}`,
+    text: `⏰ ${text}\n${WHEN_LABEL(when)}${at ? ` at ${at}` : ''}${every ? ', every time it comes round' : ', once'}, next ${next}`,
   };
 }
 

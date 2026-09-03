@@ -10,13 +10,26 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Parse a written amount into centavos. Accepts "1,234.56", "P1234.56", "₱1.2k", "250".
+ * Parse a written amount into centavos. Accepts "1,234.56", "P1234.56", "₱1.2k", "250", "299 x 3".
  * Returns null on anything it cannot read exactly — the caller then asks rather than guesses,
  * because a silently wrong amount is the one error the reconciliation row cannot distinguish
  * from forgotten spending.
  */
 export function parseAmount(raw: string | null | undefined): number | null {
   if (!raw) return null;
+
+  // "299 x 3" — three of the same thing, which is how a group order gets typed. The
+  // extractor is FORBIDDEN from multiplying it out (see extract.ts: it transcribes, code
+  // computes), so the arithmetic has to happen here, on integer centavos, where a misread
+  // is a refused message rather than a wrong balance. Order does not matter: multiplication
+  // is commutative and only one side is scaled, so "3 x 299" gives the same 89,700.
+  const qty = String(raw).match(/^(.+?)\s*[x*\u00d7]\s*(\d{1,3})$/i);
+  if (qty) {
+    const unit = parseAmount(qty[1]);
+    const out = unit == null ? null : unit * Number(qty[2]);
+    return out != null && Number.isSafeInteger(out) ? out : null;
+  }
+
   let s = String(raw)
     .trim()
     .toLowerCase()

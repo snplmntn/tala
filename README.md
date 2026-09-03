@@ -194,8 +194,15 @@ then exceeds twice the new reference and is rejected forever.
   `settings` — no table, no migration. That is not laziness: `schema.sql` has no
   `IF NOT EXISTS` and only ever runs against an empty database, so a table declared there
   would never reach a ledger that was already deployed. Capped at 20 rows of 200 characters,
-  because one settings row must not be able to become a wall in the morning message. It moves
-  into a table the day a reminder needs a time of day or a one-off calendar date.
+  because one settings row must not be able to become a wall in the morning message. A time of
+  day turned out to be one more field in that JSON rather than the thing that forces a table —
+  what would force one is needing to QUERY reminders, not needing to store another key.
+- **A timed reminder gets its own carrier, and the marker is an instant.** The daily line is a
+  date marker, which is the right recovery unit for a date. A reminder that names 17:00 is
+  scanned on the same once-a-minute tick against a stored timestamp, firing every slot inside
+  `(marker, now]` — so an outage over the moment delivers late instead of never, and the two
+  sets are disjoint by construction, because a reminder that arrives twice is one you learn to
+  ignore.
 - **GoTyme's real interest surfaces as tagged positive drift**, roughly ₱170/month. Positive
   drift on an account with no logged spending is unambiguously interest. Once the company
   actually spends from GoTyme that stops being true, and turning projection back on is one

@@ -13,7 +13,16 @@ import { createServer } from 'node:http';
 import { Db } from './db.ts';
 import { extract, transcript } from './extract.ts';
 import { addDays, dayDiff, daysBetween, manilaDate, manilaHour, manilaStartOfDay } from './ledger.ts';
-import { COMMANDS, applyEvent, balances, callback, dropFired, dueReminders, runCommand } from './handlers.ts';
+import {
+  COMMANDS,
+  applyEvent,
+  balances,
+  callback,
+  dropFired,
+  dueReminders,
+  dueTimed,
+  runCommand,
+} from './handlers.ts';
 import {
   answerCallback,
   clearKeyboard,
@@ -287,6 +296,27 @@ async function dailyLine(since: string | null, t: string): Promise<void> {
 }
 
 /**
+ * The other carrier: reminders that name a minute rather than a day.
+ *
+ * The daily line is right for anything you act on when you sit down, and wrong for a bill
+ * that closes at 17:00. So a timed reminder rides this — the same once-a-minute tick, with
+ * the same recovery property: the marker is an INSTANT, and dueTimed fires every slot inside
+ * `(marker, now]`, so a process that was down at 21:00 sends at 21:04 instead of losing it.
+ */
+async function timedReminders(): Promise<void> {
+  const now = new Date().toISOString();
+  // A first boot scans the last minute only. Defaulting to the epoch would dump every slot
+  // in the catch-up window into the chat the moment this shipped.
+  const scan = (await db.getSetting('reminder_scan')) ?? new Date(Date.now() - 60_000).toISOString();
+  const due = await dueTimed(db, scan, now);
+  for (const r of due) await send(TOKEN, OWNER, `⏰ ${r.text}`);
+  // Both AFTER the send, exactly as the daily line does it: a Telegram failure must not
+  // consume a one-off reminder, and must leave the marker where the next tick retries it.
+  await dropFired(db, due);
+  await db.setSetting('reminder_scan', now);
+}
+
+/**
  * Retry whatever a provider outage deferred, so nothing sits in the inbox forever.
  *
  * Paced, and this is not theoretical: Groq's free tier caps at 8,000 tokens per MINUTE, and
@@ -358,6 +388,7 @@ function scheduler(): void {
           ran = t; // set BEFORE the send, so a throw cannot retry it every minute
           await dailyLine(last, t);
         }
+        await timedReminders();
         await retryDeferred();
       } catch (e) {
         log('scheduler', e);

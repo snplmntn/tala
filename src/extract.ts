@@ -181,7 +181,8 @@ function schema(accountIds: string[]) {
             amount: {
               ...nullableString,
               description:
-                'the amount exactly as written, e.g. "250", "1,234.56". Never computed or converted.',
+                'the amount exactly as written, e.g. "250", "1,234.56". Never computed or converted. ' +
+                'A QUANTITY is part of the amount: copy "299 x 3" as "299 x 3" — the app multiplies it.',
             },
             account: {
               type: ['string', 'null'],
@@ -265,6 +266,8 @@ function schema(accountIds: string[]) {
                 'message is a QUESTION ABOUT the numbers rather than a bare request FOR them. ' +
                 '"did my interest get added to my balance?" / "why does maya say est?" / "is that the whole day?" -> set it. ' +
                 '"balance" / "recap" / "how much do I have" -> null, the table already answers that. ' +
+                'A "how much" or "what did I spend" question is a REQUEST for the table, however it is phrased: ' +
+                '"how much did I spend yesterday" / "what did I spend on food" -> null, with the period in date_hint. ' +
                 'Null for every other intent.',
             },
           },
@@ -278,6 +281,7 @@ const SYSTEM = `You are Tala, a money tracker in a chat. You convert one Filipin
 
 HARD RULES:
 - NEVER compute, convert or sum anything. Copy amounts exactly as written, as strings.
+- A quantity belongs IN the amount, unmultiplied: "299 x 3" -> amount "299 x 3", "3 x 15 jeep" -> amount "3 x 15". Never drop the quantity and never work out the total — the app does that, exactly.
 - NEVER guess the account. If the message does not say which account or card, return account: null. Asking is correct; guessing misfiles money.
 - NEVER invent an account name. Use only the given ids — the one exception is intent: open_account, which is how a new id comes into existence.
 - If the amount is not stated, return amount: null. Do not estimate from the merchant.
@@ -411,6 +415,8 @@ export async function answer(
     '- NEVER state a figure that is not already in the report or the facts, and never add, subtract',
     '  or convert anything, however trivial. If the number they want is not there, say you cannot',
     '  see it rather than working it out.',
+    '- The report names the period in its own first line, so never say you cannot tell which',
+    '  days it covers, and never doubt a figure printed in it.',
     '- Do not re-list the table. Say the one thing it does not say. Two or three sentences, no',
     '  markdown, no bullets. If the ledger genuinely cannot tell, say so and name what would settle it.',
     '',

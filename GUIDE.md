@@ -263,6 +263,8 @@ one row in the list.
 /remind every eom boost maya             the last day of every month
 /remind every som review subscriptions   the 1st of every month
 /remind every fri water the plants       every Friday
+/remind 25 17:00 pay the bill            the 25th, at 17:00, to the minute
+/remind every mon 9:30pm meds            every Monday at 21:30
 /remind                                  list them, numbered, with the next date
 /remind off 2                            drop one
 ```
@@ -276,9 +278,17 @@ reminder set for the 31st still arrives on 28 February — month-end is the dead
 actually set reminders for, and silently skipping five months a year would land on the one
 that mattered most.
 
-They arrive with the daily line, so they land at 08:00 in Manila. If a deadline is
-the last day of the month, set the reminder a few days earlier — arriving on the deadline is
-arriving on your last chance.
+**A time is optional, and it changes which carrier delivers it.** With no time, a reminder
+rides the daily line and lands at 08:00 in Manila — right for anything you act on when you
+sit down. Name a time (`17:00`, `9:30pm`, `9am`) and it arrives on its own, within a minute
+of the moment, because a bill that closes at 17:00 does not care what you read at breakfast.
+A bare number stays part of the text, so `/remind 25 9 internet bill` is about "9 internet
+bill" and not 09:00 — a time has to look like one.
+
+Missing the moment does not lose it: the check runs every minute against a stored marker, so
+a service that was down at 21:00 sends at 21:04. If a deadline is the last day of the month,
+set the reminder a few days earlier anyway — arriving on the deadline is arriving on your
+last chance.
 
 ### The Maya boost
 
