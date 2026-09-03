@@ -737,7 +737,7 @@ const anExpense = (db: Db, o: Record<string, unknown>) =>
       (o.merch as string) ?? null,
       (o.shared as number) ?? null,
       o.date as string,
-      `${o.date as string}T02:00:00Z`,
+      (o.logged as string) ?? `${o.date as string}T02:00:00Z`,
       (o.corrects as number) ?? null,
       (o.voided as string) ?? null,
     ],
@@ -823,18 +823,44 @@ test('recap says what it could not read, rather than answering for the wrong per
   assert.match(spoken, /week of 2026-08-31/);
 });
 
-test('an empty day distinguishes "nothing spent" from "the anchor already has it"', async () => {
-  // The one way a day can look empty when it is not: an anchor read today already contains
-  // today's spending, so a same-day expense books to tomorrow rather than netting to zero.
+test("spending logged after an anchor still shows in that day's recap", async () => {
+  // The bug this pins down. Anchor six accounts in the morning and bookingDate dates
+  // everything you log afterwards to TOMORROW, because the anchor you just read already
+  // contains it — so /recap for today showed one row out of five, and the four it dropped
+  // were the ones you had just typed. Balances were right the whole time; the recap was
+  // asking occurred_at a question occurred_at does not answer.
   const db = await fresh();
   const accounts = await db.accounts();
-  const quiet = (await runCommand(db, accounts, '/recap', '2026-09-03'))!.text;
-  assert.match(quiet, /nothing logged/);
-  assert.doesNotMatch(quiet, /books to the next day/);
+  await runCommand(db, accounts, '/snap cash 190000', '2026-09-03');
 
-  await runCommand(db, accounts, '/snap maribank 50000', '2026-09-04');
-  const anchored = (await runCommand(db, accounts, '/recap', '2026-09-04'))!.text;
-  assert.match(anchored, /books to the next day/, 'never let it read as a lost entry');
+  // Logged on the 3rd (Manila 18:00), booked to the 4th by the anchor rule. `logged_at` is
+  // set at INSERT because the append-only trigger freezes it — no UPDATE can fix it after.
+  await anExpense(db, {
+    date: '2026-09-04',
+    logged: '2026-09-03T10:00:00Z',
+    amt: -18000,
+    cat: 'education',
+    merch: 'pup icog',
+  });
+  // And one that really is the 3rd, logged before the anchor.
+  await anExpense(db, { date: '2026-09-03', amt: -1500, cat: 'transport', merch: 'tricycle' });
+
+  const today = (await runCommand(db, accounts, '/recap', '2026-09-03'))!.text;
+  assert.match(today, /tricycle/);
+  assert.match(today, /pup icog/, 'the row the anchor pushed forward belongs to the day it was typed');
+  assert.match(today, /spent\s+₱195\.00/);
+
+  // And it is not counted twice: tomorrow's recap does not also claim it.
+  const tomorrow = (await runCommand(db, accounts, '/recap', '2026-09-04'))!.text;
+  assert.doesNotMatch(tomorrow, /pup icog/);
+  assert.match(tomorrow, /nothing logged/);
+});
+
+test('an empty day is simply empty', async () => {
+  const db = await fresh();
+  const quiet = (await runCommand(db, await db.accounts(), '/recap', '2026-09-03'))!.text;
+  assert.match(quiet, /nothing logged/);
+  assert.match(quiet, /spent\s+₱0\.00/);
 });
 
 test('the void button kills the whole late-entry pair, so the balance it protects does not move', async () => {

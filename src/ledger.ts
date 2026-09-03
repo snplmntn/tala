@@ -641,6 +641,30 @@ export function unsettled(rows: Event[]): number {
 }
 
 /**
+ * The day a row belongs to in a REPORT, which is not always the day it belongs to in the
+ * reconciliation.
+ *
+ * `occurred_at` answers "when did the money move", because that is what the snapshot windows
+ * need. A same-day expense books to anchor+1 (see bookingDate) so it lands inside a window
+ * at all — the anchor you just read already contains it, and dating it on the anchor day
+ * would both net it to zero and fall outside `(anchor, next]` entirely.
+ *
+ * That makes `occurred_at` wrong for the other question a recap asks: "what did I spend
+ * today". Anchor six accounts this morning and everything you log afterwards is dated
+ * tomorrow, so today's recap shows nothing you actually spent.
+ *
+ * A row dated AFTER the day it was typed can only have been pushed there by that rule —
+ * resolveDate refuses a future hint, so nothing else can produce one. So the reporting date
+ * is the day you typed it, and otherwise it is `occurred_at` (which stays correct for a
+ * genuinely backdated entry). Total and single-valued, so no row lands in two windows or
+ * none.
+ */
+export function reportDate(r: { occurred_at: string; logged_at: string }): string {
+  const typed = manilaDate(new Date(r.logged_at));
+  return dayDiff(typed, r.occurred_at) > 0 ? typed : r.occurred_at;
+}
+
+/**
  * The part of an expense that is actually your money, as a positive spend figure.
  *
  * One expression, shared by the category totals and the itemised list, because two copies

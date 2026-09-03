@@ -196,6 +196,13 @@ purpose: it is the audit trail and the exit path, so it keeps everything and car
 **A shared expense counts only your share**, with the rest named on the line, because that is
 why the number differs from the receipt in your pocket.
 
+**Spending you log after anchoring still counts as today.** An anchor you read this morning
+already contains today's spending, so a same-day expense is dated _tomorrow_ in the ledger —
+otherwise it would net against the figure you just typed and freeze your balance for the day.
+A recap undoes that: a row dated after the day you typed it can only have been pushed there
+by the anchor rule, so it reports on the day you typed it. Balances still count it on its own
+date, and no row is ever counted in two windows.
+
 ### Reading `/balance`
 
 ```

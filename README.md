@@ -165,6 +165,16 @@ then exceeds twice the new reference and is rejected forever.
   a reminder is the whole mechanism: Tala does not know which transactions Maya counts, and
   a progress bar that reads "qualified" when you are not is worse than none in an app whose
   thesis is that an untagged number misleads.
+- **`occurred_at` answers "when did the money move", not "when did this happen".** A same-day
+  expense books to anchor+1 so it lands inside a `(anchor, next]` window at all, which means
+  anchoring six accounts in the morning dates everything logged afterwards to tomorrow — and
+  a recap of today showed one row out of five. `ledger.reportDate` resolves it without a
+  column: a row dated after the day it was typed can only have been pushed there by that
+  rule, since `resolveDate` refuses a future hint, so the gap IS the signal. Reports window
+  on the reporting date, balances stay on `occurred_at`, and the mapping is total and
+  single-valued so no row lands in two windows or none. A `booked_at` column would be the
+  other answer, and it needs an `ALTER TABLE` plus a rewrite of `events_append_only`, which
+  enumerates its columns and would leave a new one mutable.
 - **A recap's shape is chosen by its window length**, not by a flag: items for a day and a
   week, categories for a month, and `list` to override. The judgement being encoded is that
   three items need no summary and three hundred rows are unreadable in a chat. `MAX_ITEMS` is

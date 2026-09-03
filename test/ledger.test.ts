@@ -32,6 +32,7 @@ import {
   parseRate,
   peso,
   reminderDue,
+  reportDate,
   spendByCategory,
   startOfWeek,
   sum,
@@ -675,4 +676,21 @@ test('a week starts on Monday, and crossing a month does not restart it', () => 
   assert.equal(startOfWeek('2026-09-06'), '2026-08-31', 'Sunday belongs to the week that opened');
   assert.equal(startOfWeek('2026-09-07'), '2026-09-07', 'and the next Monday opens a new one');
   assert.equal(startOfWeek('2026-01-01'), '2025-12-29', 'across a year boundary too');
+});
+
+test('a row reports on the day it was typed only when an anchor pushed it forward', () => {
+  // occurred_at answers "when did the money move", which the snapshot windows need. It is
+  // the wrong answer to "what did I spend today" the moment bookingDate pushes a same-day
+  // expense to anchor+1. Nothing else can date a row after the day it was typed, because
+  // resolveDate refuses a future hint - so that gap IS the signal, and needs no column.
+  const at = (logged: string, occurred: string) => reportDate({ logged_at: logged, occurred_at: occurred });
+
+  // Manila is UTC+8: 10:00Z on the 3rd is 18:00 on the 3rd.
+  assert.equal(at('2026-09-03T10:00:00Z', '2026-09-04'), '2026-09-03', 'booked forward');
+  assert.equal(at('2026-09-03T10:00:00Z', '2026-09-03'), '2026-09-03', 'an ordinary row keeps its date');
+  assert.equal(at('2026-09-03T10:00:00Z', '2026-08-28'), '2026-08-28', 'a backdated row keeps its own');
+
+  // The daily 8-hour window the whole design keys on: 16:30Z is already tomorrow in Manila.
+  assert.equal(at('2026-09-03T16:30:00Z', '2026-09-04'), '2026-09-04', 'typed after Manila midnight');
+  assert.equal(at('2026-09-03T15:00:00Z', '2026-09-04'), '2026-09-03', 'typed at 23:00 Manila');
 });

@@ -25,6 +25,7 @@ import {
   parseAmount,
   parseRate,
   peso,
+  reportDate,
   spendByCategory,
   startOfWeek,
   sum,
@@ -222,12 +223,20 @@ export async function recap(db: Db, arg: string, today: string): Promise<string>
   const w = recapWindow(arg, today);
   if (typeof w === 'string') return w;
 
-  const rows = await db.eventsBetween(w.from, w.to);
+  // Fetched two days wide, then windowed on the REPORTING date — see ledger.reportDate. A
+  // row can only be booked one day past the day it was typed (bookingDate returns
+  // anchor+1, and an anchor is never in the future), so two days is margin, not guesswork.
+  const rows = (await db.eventsBetween(w.from, addDays(w.to, 2))).filter((r) => {
+    const d = reportDate(r);
+    return dayDiff(w.from, d) >= 0 && dayDiff(d, w.to) >= 0;
+  });
   const personal = rows.filter((r) => r.book === 'personal');
   const live = effective(personal);
+  // Carrying `day` on the row keeps the grouping, the sort and the window on ONE date.
   const expenses = live
     .filter((r) => r.type === 'expense')
-    .sort((a, b) => a.occurred_at.localeCompare(b.occurred_at) || a.id - b.id);
+    .map((r) => ({ ...r, day: reportDate(r) }))
+    .sort((a, b) => a.day.localeCompare(b.day) || a.id - b.id);
 
   const cats = [...spendByCategory(personal)].sort((a, b) => b[1] - a[1]);
   const spend = cats.reduce((t, [, v]) => t + v, 0);
@@ -238,19 +247,21 @@ export async function recap(db: Db, arg: string, today: string): Promise<string>
   );
 
   const out = [`${w.label} · personal`];
+  // 18, not 15: "pup icog document" truncated to "pup icog docume", which reads as broken
+  // rather than as abbreviated. The block is still narrower than the balance table.
   const row = (label: string, amount: number, tail = '') =>
-    `  ${label.slice(0, 15).padEnd(15)} ${peso(amount).padStart(11)}${tail}`;
+    `  ${label.slice(0, 18).padEnd(18)} ${peso(amount).padStart(11)}${tail}`;
 
   if (w.items && expenses.length) {
     const shown = expenses.slice(0, MAX_ITEMS);
     let day = '';
     for (const r of shown) {
-      if (w.byDay && r.occurred_at !== day) {
-        day = r.occurred_at;
-        const total = expenses.filter((x) => x.occurred_at === day).reduce((t, x) => t + yours(x), 0);
-        // Padded to 20 so the day's subtotal lands in the same column as its items: an
-        // indented item is 2 + row()'s own 2 + 15 + 1, and the amount is the last 11.
-        out.push(`  ${`${DAY_NAME(day)} ${day}`.padEnd(18)}${peso(total).padStart(11)}`);
+      if (w.byDay && r.day !== day) {
+        day = r.day;
+        const total = expenses.filter((x) => x.day === day).reduce((t, x) => t + yours(x), 0);
+        // Padded to 23 so the day's subtotal lands in the same column as its items: an
+        // indented item is 2 + row()'s own 2 + 18 + 1, and the amount is the last 11.
+        out.push(`  ${`${DAY_NAME(day)} ${day}`.padEnd(21)}${peso(total).padStart(11)}`);
       }
       const name = r.merchant ?? r.note ?? r.category ?? 'expense';
       // The shared portion is already out of the figure; saying so is why the number differs
@@ -278,18 +289,9 @@ export async function recap(db: Db, arg: string, today: string): Promise<string>
   const owed = unsettled(rows);
   if (owed > 0) out.push('', `owed to you: ${peso(owed)}`);
 
-  const text = mono(out.join('\n'));
-
-  // The one way a day can look empty when it is not. An anchor read today already contains
-  // today's spending, so a same-day expense books to TOMORROW rather than netting to zero
-  // against the figure you just typed — see ledger.bookingDate. Said plainly, because "the
-  // bot lost my entry" is the worst thing this app can imply.
-  if (w.from === w.to && !expenses.length) {
-    const anchored = await db.one('SELECT 1 FROM snapshots WHERE as_of_date = ?', [w.from]);
-    if (anchored)
-      return `${text}\nYou anchored on ${w.from}, so anything spent after that reading books to the next day. It shows in /recap ${addDays(w.from, 1)}.`;
-  }
-  return text;
+  // No "you anchored today, so it books to tomorrow" caveat any more: reportDate is what
+  // that note used to apologise for, and an empty day is now simply an empty day.
+  return mono(out.join('\n'));
 }
 
 /** The laziest possible answer to every future "can it show me X?". */
