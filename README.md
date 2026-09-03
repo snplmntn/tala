@@ -161,7 +161,16 @@ then exceeds twice the new reference and is rejected forever.
   days mis-attributes about ₱1.64. Revisit if you start moving six figures around.
 - **Maya's boost re-qualifies monthly** on ₱25,000 of qualifying spend, and applies to the
   first ₱100,000 only. `rate_floor` (0.024) is where it lands when a month is missed — the
-  learner accepts that drop as real, not as an error.
+  learner accepts that drop as real, not as an error. **Qualifying spend is not tracked** and
+  a reminder is the whole mechanism: Tala does not know which transactions Maya counts, and
+  a progress bar that reads "qualified" when you are not is worse than none in an app whose
+  thesis is that an untagged number misleads.
+- **A reminder is a preference, not a ledger fact**, so all of them live in one JSON row in
+  `settings` — no table, no migration. That is not laziness: `schema.sql` has no
+  `IF NOT EXISTS` and only ever runs against an empty database, so a table declared there
+  would never reach a ledger that was already deployed. Capped at 20 rows of 200 characters,
+  because one settings row must not be able to become a wall in the morning message. It moves
+  into a table the day a reminder needs a time of day or a one-off calendar date.
 - **GoTyme's real interest surfaces as tagged positive drift**, roughly ₱170/month. Positive
   drift on an account with no logged spending is unambiguously interest. Once the company
   actually spends from GoTyme that stops being true, and turning projection back on is one
@@ -266,6 +275,18 @@ sqlite3 /tmp/tala.db < /tmp/tala.sql
 sqlite3 /tmp/tala.db "SELECT COUNT(*), SUM(amount_centavos) FROM events WHERE voided_at IS NULL;"
 tail -1 /tmp/tala.sql   # the dump's own verify line — the two must match
 ```
+
+**The daily line marks itself in two places, and both are load-bearing.** It carries every
+alarm — balances, a stale-anchor nudge, and whatever reminders came due — so a day it skips
+is a day of nudges nobody gets. The marker used to be in memory only, initialised from
+`today()` at boot, which meant a process down for all of the 25th silently never sent the
+25th: survivable for a balance table you can retype as `/balance`, not for a reminder, which
+is simply gone. It is now persisted in `settings`, and the missed days are folded into the
+next line's catch-up window (31 days, then it is history rather than a nudge). The in-memory
+marker stays because `getSetting` reports a database outage as "no preference set" — stored
+alone, a Turso blip would re-send the daily line once a minute, forever. Firing on a
+first-ever boot is deliberate; every later same-day restart reads the stored marker and stays
+quiet, so this is a stronger anti-spam guarantee than the in-memory version it replaces.
 
 ## Layout
 

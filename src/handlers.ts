@@ -12,7 +12,7 @@
 
 import { Db, type Account } from './db.ts';
 import type { Extracted } from './extract.ts';
-import { addDays, dayDiff, peso, unsettled, type Event } from './ledger.ts';
+import { WEEKDAYS, addDays, dayDiff, peso, reminderDue, unsettled, type Event } from './ledger.ts';
 import { correct, money, transfer, undo } from './entries.ts';
 import { anchorAccount, proposeAnchor, snapshot } from './anchors.ts';
 import { balances, csv, interest, rates, recap } from './reports.ts';
@@ -172,6 +172,7 @@ export const COMMANDS = [
   { name: 'rate', args: '[account] [10% gross]', help: 'see rates, or set one' },
   { name: 'owed', args: '', help: 'money you fronted that has not come back' },
   { name: 'account', args: '[add|off|on] …', help: 'list accounts, or open and close them' },
+  { name: 'remind', args: '[every] <day|mon-sun|som|eom> <text>', help: 'a nudge on the daily line' },
   { name: 'name', args: '[what to call you]', help: 'what Tala calls you' },
   { name: 'undo', args: '', help: 'void the last entry' },
   { name: 'csv', args: '', help: 'the whole ledger as a spreadsheet' },
@@ -273,6 +274,9 @@ export async function runCommand(
     case 'account':
     case 'accounts':
       return accountsCmd(db, arg);
+    case 'remind':
+    case 'reminders':
+      return remindCmd(db, arg, today);
     case 'owed': {
       const owed = unsettled(await db.allEvents());
       return { text: owed > 0 ? `owed to you: ${peso(owed)}` : 'nothing outstanding' };
@@ -330,6 +334,189 @@ export async function proposeAccount(db: Db, name: string | null, book: string |
       KINDS.map((k) => ({ text: k, callback_data: `open:${k}:${payload}` })),
       [{ text: '✗ cancel', callback_data: 'nope' }],
     ],
+  };
+}
+
+// ── reminders ───────────────────────────────────────────────────────────────
+
+/**
+ * A nudge on the daily line. Deliberately not financial — the Maya boost is one row in the
+ * list, not the reason the list exists.
+ *
+ * Stored as ONE JSON row in `settings`, which is why there is no migration: schema.sql has
+ * no IF NOT EXISTS and only ever runs against an empty database, so a table declared there
+ * would never reach a ledger that was already deployed. `settings` is created in db.ts for
+ * exactly this reason, and a reminder is a preference, not a ledger fact.
+ */
+export interface Reminder {
+  when: string; // 'som' | 'eom' | '1'..'31' | 'mon'..'sun'
+  text: string;
+  /** Absent means ONE-OFF, which is the default: it deletes itself after it fires. */
+  every?: boolean;
+}
+
+const REMINDERS = 'reminders';
+// One settings row must not be able to become a wall in the morning message.
+const MAX_REMINDERS = 20;
+const MAX_TEXT = 200;
+
+async function loadReminders(db: Db): Promise<Reminder[]> {
+  const raw = await db.getSetting(REMINDERS);
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter((r): r is Reminder => typeof r?.when === 'string' && typeof r?.text === 'string')
+      : [];
+  } catch {
+    // A hand-edited settings row must not be able to stop the daily line arriving.
+    return [];
+  }
+}
+
+const saveReminders = (db: Db, rows: Reminder[]) => db.setSetting(REMINDERS, JSON.stringify(rows));
+
+const same = (a: Reminder, b: Reminder) => a.when === b.when && a.text === b.text;
+
+/**
+ * Everything due on any of `dates`. A LIST of dates, not one, because the daily line catches
+ * up after an outage — a reminder that came due while the process was down fires late rather
+ * than being lost, which is the whole point of persisting the marker.
+ */
+export async function dueReminders(db: Db, dates: string[]): Promise<Reminder[]> {
+  const all = await loadReminders(db);
+  return all.filter((r) => dates.some((d) => reminderDue(r.when, d)));
+}
+
+/**
+ * Retire the one-offs that just fired. Separate from `dueReminders` so the caller can send
+ * FIRST and delete second: a Telegram failure must not silently consume a reminder.
+ */
+export async function dropFired(db: Db, fired: Reminder[]): Promise<void> {
+  const oneOffs = fired.filter((r) => !r.every);
+  if (!oneOffs.length) return;
+  const all = await loadReminders(db);
+  const keep = all.filter((r) => !oneOffs.some((f) => same(f, r)));
+  if (keep.length !== all.length) await saveReminders(db, keep);
+}
+
+const WHEN_LABEL = (when: string): string =>
+  when === 'som'
+    ? 'the 1st'
+    : when === 'eom'
+      ? 'the last day'
+      : WEEKDAYS.includes(when as never)
+        ? `${when[0].toUpperCase()}${when.slice(1)}`
+        : `day ${when}`;
+
+/**
+ * Accepts what people type; refuses everything else rather than guessing a day.
+ *
+ * Weekdays are matched EXACTLY against an alias table, never by prefix: "mon" is a prefix of
+ * "money" and "sat" of "satisfy", so `/remind money check the card` would have quietly
+ * become a Monday reminder to "check the card". A dozen table entries buy the certainty.
+ */
+const WEEKDAY_WORDS: Record<string, string> = {
+  sun: 'sun',
+  sunday: 'sun',
+  mon: 'mon',
+  monday: 'mon',
+  tue: 'tue',
+  tues: 'tue',
+  tuesday: 'tue',
+  wed: 'wed',
+  weds: 'wed',
+  wednesday: 'wed',
+  thu: 'thu',
+  thur: 'thu',
+  thurs: 'thu',
+  thursday: 'thu',
+  fri: 'fri',
+  friday: 'fri',
+  sat: 'sat',
+  saturday: 'sat',
+};
+
+function parseWhen(raw: string): string | null {
+  const w = raw.toLowerCase();
+  if (w === 'som' || w === 'start' || w === 'first') return 'som';
+  if (w === 'eom' || w === 'end' || w === 'last') return 'eom';
+  if (WEEKDAY_WORDS[w]) return WEEKDAY_WORDS[w];
+  const n = Number(w.replace(/(st|nd|rd|th)$/, ''));
+  return Number.isInteger(n) && n >= 1 && n <= 31 ? String(n) : null;
+}
+
+/** Scanned forward rather than computed: exact for every clamp and weekday, and 8 lines shorter. */
+function nextFire(when: string, from: string): string | null {
+  for (let i = 1; i <= 366; i++) {
+    const d = addDays(from, i);
+    if (reminderDue(when, d)) return d;
+  }
+  return null;
+}
+
+const REMIND_USAGE = [
+  '/remind eom boost maya          once, on the last day of this month',
+  '/remind every 25 internet bill  every month on the 25th',
+  '/remind every fri water the plants',
+  '/remind som review subscriptions',
+  '/remind            list them',
+  '/remind off 2      drop one',
+].join('\n');
+
+export async function remindCmd(db: Db, arg: string, today: string): Promise<Reply> {
+  const parts = arg.trim().split(/\s+/).filter(Boolean);
+  const list = await loadReminders(db);
+
+  if (!parts.length) {
+    if (!list.length)
+      return { text: ['Nothing set. They arrive with the daily line.', '', REMIND_USAGE].join('\n') };
+    const lines = list.map((r, i) => {
+      const next = nextFire(r.when, today);
+      return `  ${String(i + 1).padEnd(3)} ${WHEN_LABEL(r.when).padEnd(13)} ${(r.every ? 'every' : 'once').padEnd(6)} ${next ?? ''}  ${r.text}`;
+    });
+    return {
+      text: [
+        'Reminders — they ride on the daily line, just after midnight in Manila.',
+        mono(lines.join('\n')),
+        '/remind off <n> to drop one · /remind for the full syntax',
+      ].join('\n'),
+    };
+  }
+
+  if (parts[0] === 'off') {
+    const n = Number(parts[1]);
+    if (!Number.isInteger(n) || n < 1 || n > list.length)
+      return { text: `Which one? /remind off 1..${list.length || 1}` };
+    const [gone] = list.splice(n - 1, 1);
+    await saveReminders(db, list);
+    return { text: `dropped: ${gone.text}` };
+  }
+
+  const every = parts[0] === 'every' || parts[0] === 'monthly' || parts[0] === 'weekly';
+  const rest = every ? parts.slice(1) : parts;
+  const when = rest.length ? parseWhen(rest[0]) : null;
+  if (!when)
+    return {
+      text: [`Couldn't read "${rest[0] ?? ''}" as a day.`, '', REMIND_USAGE].join('\n'),
+    };
+
+  // Control characters stripped, not escaped: telegram.ts marks its monospace blocks with
+  // them, so they are markup rather than something a reminder should be able to carry.
+  const text = rest
+    .slice(1)
+    .join(' ')
+    .replace(/[\u0000-\u0008]/g, '')
+    .slice(0, MAX_TEXT);
+  if (!text) return { text: `Remind you of what? e.g. /remind ${rest[0]} boost maya` };
+  if (list.length >= MAX_REMINDERS)
+    return { text: `That is ${MAX_REMINDERS} reminders already — /remind off <n> to make room.` };
+
+  const row: Reminder = every ? { when, text, every: true } : { when, text };
+  await saveReminders(db, [...list, row]);
+  const next = nextFire(when, today);
+  return {
+    text: `⏰ ${text}\n${WHEN_LABEL(when)}${every ? ', every time it comes round' : ', once'} — next ${next}`,
   };
 }
 

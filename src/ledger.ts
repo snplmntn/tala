@@ -95,6 +95,43 @@ export function daysBetween(from: string, to: string): string[] {
 
 export const monthOf = (date: string): string => date.slice(0, 7);
 
+/** 0 = Sunday. Pure calendar via Date.UTC, so a Manila Friday is never a host-local Thursday. */
+export function weekdayOf(date: string): number {
+  const [y, m, d] = date.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+}
+
+/** Day 0 of the next month IS the last day of this one — no month-length table. */
+export function lastDayOfMonth(date: string): number {
+  const [y, m] = date.split('-').map(Number);
+  return new Date(Date.UTC(y, m, 0)).getUTCDate();
+}
+
+export const WEEKDAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'] as const;
+
+/**
+ * Is a reminder due on this Manila civil date?
+ *
+ * `when` is one of: 'som' (the 1st), 'eom' (the last day, whatever it is), a weekday
+ * abbreviation, or a day of the month.
+ *
+ * A day number past the month's length CLAMPS to the last day rather than not firing. The
+ * 31st would otherwise be silently skipped in February, April, June, September and November
+ * — and month-end is the deadline people actually set reminders for, so the failure would
+ * land exactly on the reminder that mattered most. 'eom' says it explicitly; the clamp is
+ * for the person who typed 31 meaning the same thing.
+ */
+export function reminderDue(when: string, date: string): boolean {
+  const dom = Number(date.slice(8, 10));
+  const last = lastDayOfMonth(date);
+  if (when === 'som') return dom === 1;
+  if (when === 'eom') return dom === last;
+  const wd = WEEKDAYS.indexOf(when as never);
+  if (wd >= 0) return weekdayOf(date) === wd;
+  const n = Number(when);
+  return Number.isInteger(n) && n >= 1 && dom === Math.min(n, last);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Events and correction resolution.
 // ─────────────────────────────────────────────────────────────────────────────

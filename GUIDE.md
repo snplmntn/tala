@@ -185,6 +185,59 @@ transactions well enough to say what went wrong. Seeing it the next morning, you
 **It is also the dead-man switch.** A daily message that stops arriving _is_ the alarm that
 something is down. Nothing else monitors it, on purpose.
 
+If the service was down when midnight passed, the line arrives late and says so
+(`late, no daily line for 2d`) rather than being skipped — and anything that came due in
+those days comes with it. The catch-up window is a month; older than that is history, not a
+nudge.
+
+---
+
+## Reminders
+
+Anything you want said back to you on a given day. Not financial — the Maya boost is just
+one row in the list.
+
+```
+/remind 15 renew the domain              once, on the next 15th
+/remind every 25 internet bill           the 25th, every month
+/remind every eom boost maya             the last day of every month
+/remind every som review subscriptions   the 1st of every month
+/remind every fri water the plants       every Friday
+/remind                                  list them, numbered, with the next date
+/remind off 2                            drop one
+```
+
+**One-off is the default.** A reminder fires once and retires itself; `every` is how you ask
+for the repeat. For a day of the month that means monthly, for a weekday it means weekly.
+
+**`eom` is not the same as `31`.** It means the last day, whatever the month's length is. A
+day number past the end of a month clamps down to the last day rather than not firing, so a
+reminder set for the 31st still arrives on 28 February — month-end is the deadline people
+actually set reminders for, and silently skipping five months a year would land on the one
+that mattered most.
+
+They arrive with the daily line, so they land just after midnight in Manila. If a deadline is
+the last day of the month, set the reminder a few days earlier — arriving on the deadline is
+arriving on your last chance.
+
+### The Maya boost
+
+This is what the feature got built for. Maya's boosted rate re-qualifies every calendar month
+on qualifying spend, and lapses back to the base rate if you miss it:
+
+```
+/remind every 25 boost maya - check qualifying spend in the app
+```
+
+Tala does **not** track your qualifying spend. It cannot: it does not know which of your
+transactions Maya counts, and a progress bar that says "you're qualified" when you are not is
+worse than no progress bar in an app whose whole thesis is that an untagged number misleads.
+
+It does handle the lapse correctly after the fact. `rate_floor` for Maya is already 0.024
+(your 3% gross, less the 20% withholding), and the rate learner accepts a drop to the floor
+as real rather than as a data error — so report a credit or two after a missed month and the
+projections follow you down without being told.
+
 ---
 
 ## Reconciling, and what drift means

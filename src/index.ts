@@ -12,8 +12,8 @@
 import { createServer } from 'node:http';
 import { Db } from './db.ts';
 import { extract, transcript } from './extract.ts';
-import { dayDiff, manilaDate } from './ledger.ts';
-import { COMMANDS, applyEvent, balances, callback, runCommand } from './handlers.ts';
+import { addDays, dayDiff, daysBetween, manilaDate } from './ledger.ts';
+import { COMMANDS, applyEvent, balances, callback, dropFired, dueReminders, runCommand } from './handlers.ts';
 import {
   answerCallback,
   clearKeyboard,
@@ -228,9 +228,11 @@ async function handle(u: Update): Promise<boolean> {
  * It is also its own dead-man switch, which is why no external watchdog is needed: a daily
  * message that stops arriving IS the alarm.
  */
-async function dailyLine(): Promise<void> {
+/** A month of catch-up is plenty; anything older is history, not a nudge. */
+const CATCHUP_DAYS = 31;
+
+async function dailyLine(since: string | null, t: string): Promise<void> {
   const accounts = await db.accounts();
-  const t = today();
   const name = await db.getSetting('owner_name');
   const body = await balances(db, accounts, t);
 
@@ -242,7 +244,20 @@ async function dailyLine(): Promise<void> {
   );
   const stalest = Math.max(...ages);
   const nudge = stalest >= 28 ? `\n\nAnchors are ${stalest}d old — time to /snap.` : '';
-  await send(TOKEN, OWNER, `${name ? `${name} — ` : ''}${t}\n${body}${nudge}`);
+
+  // Every day the process missed, so a reminder that came due during an outage still fires
+  // — late, and SAYING it is late. A silent catch-up would erase the evidence of the
+  // outage, which is the one thing the daily line exists to make visible.
+  const dates = since ? daysBetween(addDays(since, 1), t).slice(-CATCHUP_DAYS) : [t];
+  const due = await dueReminders(db, dates);
+  const bell = due.length ? `\n\n${due.map((r) => `⏰ ${r.text}`).join('\n')}` : '';
+  const late = dates.length > 1 ? ` · late, no daily line for ${dates.length - 1}d` : '';
+
+  await send(TOKEN, OWNER, `${name ? `${name} — ` : ''}${t}${late}\n${body}${nudge}${bell}`);
+  // Both AFTER the send, and in this order: a Telegram failure must not consume a one-off
+  // reminder, and must leave the marker unset so the next tick tries again.
+  await dropFired(db, due);
+  await db.setSetting('last_daily_line', t);
 }
 
 /**
@@ -290,16 +305,28 @@ async function retryDeferred(): Promise<void> {
  * offset ever changed. Checking the Manila civil date every minute is smaller than that and
  * cannot drift — and it survives the process restarting at any hour, because the marker is
  * the date itself, not a timer.
+ *
+ * TWO markers, and both are load-bearing. The stored one is what makes a missed day recover:
+ * this used to initialise from `today()` on boot, so a process that was down all of the 25th
+ * silently never sent the 25th — fine for a balance table you can retype as /balance, fatal
+ * for a reminder, which is simply gone. The in-memory one is what stops a database outage
+ * from looping the send: getSetting reports a failed read as "no preference set", which
+ * would otherwise look like a day that had not run, once a minute, forever.
+ *
+ * Firing on a FIRST-EVER boot is deliberate and not a regression of the old "do not fire on
+ * boot": every later same-day restart reads the stored marker and stays quiet, so the
+ * anti-spam property is now stronger than the in-memory version it replaces.
  */
 function scheduler(): void {
-  let lastRun = today(); // do not fire on boot
+  let ran: string | null = null;
   setInterval(() => {
     void (async () => {
       try {
         const t = today();
-        if (t !== lastRun) {
-          lastRun = t;
-          await dailyLine();
+        const last = ran === t ? t : await db.getSetting('last_daily_line');
+        if (last !== t) {
+          ran = t; // set BEFORE the send, so a throw cannot retry it every minute
+          await dailyLine(last, t);
         }
         await retryDeferred();
       } catch (e) {

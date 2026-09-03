@@ -17,7 +17,15 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 import { Db } from '../src/db.ts';
-import { anchorAccount, applyEvent, balances, callback, runCommand } from '../src/handlers.ts';
+import {
+  anchorAccount,
+  applyEvent,
+  balances,
+  callback,
+  dropFired,
+  dueReminders,
+  runCommand,
+} from '../src/handlers.ts';
 import type { Extracted } from '../src/extract.ts';
 
 const SCHEMA = readFileSync(new URL('../schema.sql', import.meta.url), 'utf8');
@@ -635,4 +643,80 @@ test('a date that cannot be read is refused by name, never filed under today', a
     /has not happened yet/,
   );
   assert.equal(await db.one('SELECT 1 FROM events'), null, 'and nothing was written');
+});
+
+// -- reminders ---------------------------------------------------------------
+
+test('a reminder is one-off by default and repeats only when asked', async () => {
+  const db = await fresh();
+  const accounts = await db.accounts();
+  const cmd = (line: string, today = '2026-09-03') => runCommand(db, accounts, line, today);
+
+  assert.match((await cmd('/remind'))!.text, /Nothing set/);
+
+  // Default: once. "every" is the opt-in.
+  assert.match((await cmd('/remind eom boost maya'))!.text, /the last day, once/);
+  assert.match((await cmd('/remind eom boost maya again'))!.text, /next 2026-09-30/);
+  assert.match((await cmd('/remind every 25 internet bill'))!.text, /day 25, every time it comes round/);
+  assert.match((await cmd('/remind every fri water the plants'))!.text, /Fri, every/);
+
+  const listed = (await cmd('/remind'))!.text;
+  assert.match(listed, /boost maya/);
+  assert.match(listed, /internet bill/);
+  assert.match(listed, /water the plants/, 'nothing about the list is financial');
+
+  // A junk day is refused rather than guessed at. "money" and "satisfy" are the ones that
+  // matter: a prefix match on weekday names swallows both, and the reminder silently moves.
+  assert.match((await cmd('/remind someday call mom'))!.text, /Couldn.t read "someday" as a day/);
+  assert.match((await cmd('/remind money check the card'))!.text, /Couldn.t read "money" as a day/);
+  assert.match((await cmd('/remind satisfy the audit'))!.text, /Couldn.t read "satisfy" as a day/);
+  assert.match((await cmd('/remind tuesday standup notes'))!.text, /Tue, once/);
+  assert.match((await cmd('/remind eom'))!.text, /Remind you of what/);
+
+  await cmd('/remind off 1');
+  assert.doesNotMatch((await cmd('/remind'))!.text, /boost maya once/);
+});
+
+test('a one-off fires once and retires itself; a repeating one stays', async () => {
+  const db = await fresh();
+  const accounts = await db.accounts();
+  await runCommand(db, accounts, '/remind eom boost maya', '2026-09-03');
+  await runCommand(db, accounts, '/remind every eom snap everything', '2026-09-03');
+
+  const due = await dueReminders(db, ['2026-09-30']);
+  assert.deepEqual(due.map((r) => r.text).sort(), ['boost maya', 'snap everything']);
+
+  await dropFired(db, due);
+  const after = await dueReminders(db, ['2026-10-31']);
+  assert.deepEqual(
+    after.map((r) => r.text),
+    ['snap everything'],
+    'the one-off is gone, the repeating one comes round again',
+  );
+});
+
+test('a reminder that came due while the process was down still fires, late', async () => {
+  // The daily line used to mark itself in memory, so a process that was down all of the
+  // 25th silently never sent the 25th. A balance table can be retyped; a reminder is gone.
+  const db = await fresh();
+  const accounts = await db.accounts();
+  await runCommand(db, accounts, '/remind 25 renew the domain', '2026-09-20');
+
+  assert.deepEqual(await dueReminders(db, ['2026-09-27']), [], 'not due on the day it booted');
+  const caught = await dueReminders(db, ['2026-09-24', '2026-09-25', '2026-09-26', '2026-09-27']);
+  assert.deepEqual(
+    caught.map((r) => r.text),
+    ['renew the domain'],
+    'the catch-up window covers the days that were missed',
+  );
+});
+
+test('reminder text cannot smuggle a monospace marker into the daily line', async () => {
+  // telegram.ts escapes every outgoing string, but it marks its monospace blocks with
+  // control characters - those are markup, and user text must not be able to carry them.
+  const db = await fresh();
+  const accounts = await db.accounts();
+  await runCommand(db, accounts, '/remind eom <b>' + '\u0001' + 'hi</b>', '2026-09-03');
+  const [row] = await dueReminders(db, ['2026-09-30']);
+  assert.equal(row.text, '<b>hi</b>', 'the marker is stripped; the tags stay inert text');
 });

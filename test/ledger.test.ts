@@ -31,6 +31,7 @@ import {
   parseAmount,
   parseRate,
   peso,
+  reminderDue,
   spendByCategory,
   sum,
   unsettled,
@@ -625,4 +626,42 @@ test('a forward-booked same-day expense shows in the balance immediately', () =>
   // And a row dated ON the anchor is still excluded — the anchor already contains it.
   const sameDayRow = ev({ amount_centavos: -9_900, occurred_at: '2026-09-03' });
   assert.equal(balanceOf(MARIBANK, anchor, [sameDayRow], '2026-09-03').confirmed, 1_300_000);
+});
+
+// -- reminder days -----------------------------------------------------------
+
+test('a day-of-month reminder clamps instead of silently never firing', () => {
+  // The 31st exists in seven months of twelve. Left unclamped, a reminder set for it is
+  // skipped in February, April, June, September and November - and month-end is precisely
+  // the deadline people set reminders for, so the failure lands on the one that mattered.
+  assert.equal(reminderDue('31', '2026-01-31'), true);
+  assert.equal(reminderDue('31', '2026-02-28'), true, 'February gets it on the 28th');
+  assert.equal(reminderDue('31', '2026-02-27'), false);
+  assert.equal(reminderDue('31', '2024-02-29'), true, 'and on the 29th in a leap year');
+  assert.equal(reminderDue('31', '2026-04-30'), true);
+  assert.equal(reminderDue('31', '2026-05-30'), false, 'a 31-day month fires on the 31st only');
+});
+
+test('som and eom mean the ends of the month, whatever length it is', () => {
+  assert.equal(reminderDue('som', '2026-09-01'), true);
+  assert.equal(reminderDue('som', '2026-09-02'), false);
+  assert.equal(reminderDue('eom', '2026-09-30'), true);
+  assert.equal(reminderDue('eom', '2026-09-29'), false);
+  assert.equal(reminderDue('eom', '2026-02-28'), true);
+  // The Maya boost case: the last day is the last chance to have qualified.
+  assert.equal(reminderDue('eom', '2026-12-31'), true);
+});
+
+test('a weekday reminder is a Manila weekday, and crosses months', () => {
+  // 2026-10-01 is a Thursday; 2026-09-30 a Wednesday. Pure calendar, no host timezone.
+  assert.equal(reminderDue('thu', '2026-10-01'), true);
+  assert.equal(reminderDue('wed', '2026-09-30'), true);
+  assert.equal(reminderDue('thu', '2026-09-30'), false);
+  assert.equal(reminderDue('sun', '2026-10-04'), true);
+});
+
+test('a day that cannot be read is never due, rather than due every day', () => {
+  for (const junk of ['', 'someday', '0', '32', '-1', '2.5']) {
+    assert.equal(reminderDue(junk, '2026-09-01'), false, junk);
+  }
 });
