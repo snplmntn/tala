@@ -169,6 +169,7 @@ You can type these as commands or just say them.
 | `/recap` or "what did I spend"     | today, itemised                   |
 | `/recap week`                      | Monday to today, grouped by day   |
 | `/recap month` or `/recap 2026-08` | a whole month, by category        |
+| `/recap last month`                | the previous month                |
 | `/owed` or "who owes me"           | money you fronted                 |
 | `/csv`                             | the whole ledger as a spreadsheet |
 
@@ -177,12 +178,22 @@ You can type these as commands or just say them.
 ```
 /recap                  today, itemised          ← the default
 /recap yesterday        yesterday, itemised
+/recap 3 days ago       counting back from today
+/recap last tuesday     the most recent Tuesday before today
+/recap sep 1            a day by name, this year or last, whichever already happened
 /recap 2026-09-03       one particular day
 /recap week             Monday to today, grouped by day with a subtotal each
+/recap last week        the whole previous week
 /recap month            this month, by category
+/recap last month       the previous month
 /recap 2026-08          a past month, by category
 /recap month list       a month as individual rows instead
 ```
+
+**Any day you can put on a purchase, you can recap.** "last tuesday", "3 days ago" and
+"sep 1" mean the same thing whether you are dating an expense or asking for a day's rows —
+one grammar, so there is nothing to remember twice. A date it cannot read is refused by name
+rather than answered for today.
 
 **The window decides the shape, not a flag.** A day is a handful of rows, so the rows _are_
 the recap — category totals over three items summarise something you can already see. A month

@@ -203,7 +203,10 @@ function schema(accountIds: string[]) {
             date_hint: {
               ...nullableString,
               description:
-                'only if the message says when: "yesterday", "sep 1", "last monday". Null means today.',
+                'WHEN. For a recorded event this is the DAY: "yesterday", "3 days ago", "last monday", ' +
+                '"sep 1", or an ISO date. For intent=query it is the PERIOD being asked about instead: ' +
+                '"today", "yesterday", "week", "month", "last week", "last month", or "2026-08" — ' +
+                '"what did I spend this month" is date_hint "month". Null means today.',
             },
             shared_amount: {
               ...nullableString,
@@ -482,16 +485,31 @@ export async function answer(
   return (json.choices?.[0]?.message?.content ?? '').trim();
 }
 
+/** Matched by PREFIX, so "sep", "sept" and "september" all land on the same month. */
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+const DAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+
+/**
+ * A date that exists. "2026-02-31" survives every regex and then silently becomes March 3rd
+ * once anything constructs a Date from it, which is a wrong day nobody ever sees typed.
+ */
+const realDay = (iso: string): string | null =>
+  new Date(`${iso}T00:00:00Z`).toISOString().slice(0, 10) === iso ? iso : null;
+
 /**
  * Resolve a relative date hint against today, in Manila civil dates.
  *
- * Deliberately narrow: it handles what people actually type and returns NULL otherwise,
- * rather than a hallucinated date in the wrong month.
+ * It must understand every format the SCHEMA advertises to the model, and that is the whole
+ * reason this grew. The date_hint description offered "sep 1" and "last monday" as examples
+ * while this function knew neither, so the model dutifully produced them and every one came
+ * back null — which the expense path then swallowed as `?? today`. A prompt and a parser
+ * written to different specs is how money gets filed on a day you never chose.
  *
- * Null, not `today`, because the two callers need opposite things from an unreadable hint.
- * An LLM date_hint falls back to today (`?? today` at the call site) — a rejected expense
- * is worse than a mis-dated one. A hint the user TYPED is refused by name, because silently
- * filing "last monday" under today is the kind of wrong you never find out about.
+ * Still returns NULL rather than guessing, and now every caller refuses by name on null. The
+ * old asymmetry (typed hints refused, spoken hints defaulted to today) was a reasonable trade
+ * when an unreadable hint was rare; once the schema was advertising two unreadable formats it
+ * stopped being rare, and a silently mis-dated expense is the one error you cannot spot by
+ * reading the reply back.
  */
 export function resolveDate(
   hint: string | null,
@@ -499,11 +517,39 @@ export function resolveDate(
   addDays: (d: string, n: number) => string,
 ): string | null {
   if (!hint) return today;
-  const h = hint.trim().toLowerCase();
+  const h = hint.trim().toLowerCase().replace(/[.,]/g, '');
   if (h === 'today') return today;
   if (h === 'yesterday') return addDays(today, -1);
   const ago = h.match(/^(\d+)\s*days?\s*ago$/);
   if (ago) return addDays(today, -Number(ago[1]));
-  if (/^\d{4}-\d{2}-\d{2}$/.test(h)) return h;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(h)) return realDay(h);
+
+  // The most recent one STRICTLY before today. One rule covers both wordings, and it is what
+  // makes "last tuesday" said ON a Tuesday mean a week ago rather than this morning.
+  const bare = h.replace(/^(last|nung|noong)\s+/, '');
+  const wd = bare.length >= 3 ? DAY_NAMES.findIndex((d) => d.startsWith(bare)) : -1;
+  if (wd >= 0) {
+    // Inlined rather than imported from ledger.weekdayOf: this file imports NOTHING, which is
+    // what makes it the one adapter you swap when the provider changes.
+    // ponytail: two lines of calendar, not a dependency.
+    const [y, m, d] = today.split('-').map(Number);
+    const todayWd = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+    return addDays(today, -((todayWd - wd + 7) % 7 || 7));
+  }
+
+  // "sep 1" and "1 september", either order. The year is inferred and never asked: a date you
+  // type is one that already happened, so a day still ahead of today belongs to last year.
+  const md = h.match(/^([a-z]{3,9})\s+(\d{1,2})$/);
+  const dm = h.match(/^(\d{1,2})\s+([a-z]{3,9})$/);
+  const name = md?.[1] ?? dm?.[2];
+  const num = md?.[2] ?? dm?.[1];
+  if (name && num) {
+    const mi = MONTHS.findIndex((m) => name.startsWith(m));
+    if (mi >= 0) {
+      const iso = (yr: number) => `${yr}-${String(mi + 1).padStart(2, '0')}-${num.padStart(2, '0')}`;
+      const y = Number(today.slice(0, 4));
+      return realDay(iso(iso(y) > today ? y - 1 : y));
+    }
+  }
   return null;
 }

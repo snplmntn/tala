@@ -53,6 +53,16 @@ export const rowKeys = (id: number): Keyboard => [
   ],
 ];
 
+/**
+ * One wording for a date that could not be read, wherever the hint came from.
+ *
+ * Here and not in the three files that need it, for the same reason noAccount() is: a hint
+ * reaches the parser from a typed command, from a spoken sentence and from the model's
+ * date_hint, and three copies of this sentence is how they drift into three answers.
+ */
+export const badDate = (hint: string | null | undefined): string =>
+  `Couldn't read "${hint ?? ''}" as a date. Use 2026-09-02, "yesterday", "3 days ago" or "last tuesday".`;
+
 /** One wording for a name that is not an account, wherever the name came from. */
 export const noAccount = (name: string | null | undefined, accounts: Account[]): string =>
   `No account "${name ?? ''}". One of: ${accounts.map((a) => a.id).join(' / ')}`;

@@ -36,7 +36,7 @@ import {
   yours,
   type Event,
 } from './ledger.ts';
-import { acct, noAccount, nowIso, type Reply } from './reply.ts';
+import { acct, badDate, noAccount, nowIso, type Reply } from './reply.ts';
 import { mono } from './telegram.ts';
 
 /**
@@ -240,7 +240,16 @@ const DAY_NAME = (d: string) => {
   return `${w[0].toUpperCase()}${w.slice(1)}`;
 };
 
-/** Returns a window, or the sentence to say instead. */
+/**
+ * Returns a window, or the sentence to say instead.
+ *
+ * Two grammars, one field. This function owns PERIODS (week, month, a named month) and
+ * resolveDate owns single DAYS, and everything it does not recognise as a period is handed
+ * straight to resolveDate rather than re-parsed here. They used to be independent lists and
+ * the overlap was partial in both directions: "3 days ago" dated an expense fine but reached
+ * this function as the bare word "3" and came back "Couldn't read", while "month" was a date
+ * nowhere. Whatever you can say about a purchase you can now say about a recap.
+ */
 function recapWindow(arg: string, today: string): Window | string {
   // "this" is dropped so "this week" and "week" are the same thing — the spoken path sends
   // whichever the model heard, and re-asking over a filler word is how a bot feels like a form.
@@ -250,7 +259,11 @@ function recapWindow(arg: string, today: string): Window | string {
     .split(/\s+/)
     .filter((w) => w && w !== 'this');
   const force = parts.includes('list') || parts.includes('all');
-  const word = parts.find((w) => w !== 'list' && w !== 'all');
+  const words = parts.filter((w) => w !== 'list' && w !== 'all');
+  // "last" is a period modifier here and a day modifier in resolveDate ("last tuesday"), so it
+  // is claimed ONLY in front of a period word and otherwise travels on with the phrase.
+  const prev = words[0] === 'last' && (words[1] === 'week' || words[1] === 'month');
+  const word = prev ? words[1] : words[0];
   const day = (d: string): Window => ({
     from: d,
     to: d,
@@ -259,19 +272,21 @@ function recapWindow(arg: string, today: string): Window | string {
     byDay: false,
   });
 
-  if (!word || word === 'today') return day(today);
-  if (word === 'yesterday') return day(addDays(today, -1));
+  if (!word) return day(today);
   if (word === 'week') {
     // Monday to TODAY, not Monday to Sunday: days that have not happened are not a recap.
-    const from = startOfWeek(today);
-    return { from, to: today, label: `week of ${from}`, items: true, byDay: true };
+    // A PAST week is whole, because all seven of its days have happened.
+    const from = prev ? addDays(startOfWeek(today), -7) : startOfWeek(today);
+    return { from, to: prev ? addDays(from, 6) : today, label: `week of ${from}`, items: true, byDay: true };
   }
   if (word === 'month' || /^\d{4}-\d{2}$/.test(word)) {
-    const m = word === 'month' ? monthOf(today) : word;
+    // Day 0 of this month is the last day of the previous one, so no month-length table.
+    const m = word !== 'month' ? word : prev ? monthOf(addDays(`${monthOf(today)}-01`, -1)) : monthOf(today);
     return { from: `${m}-01`, to: `${m}-${lastDayOfMonth(`${m}-01`)}`, label: m, items: force, byDay: false };
   }
-  if (/^\d{4}-\d{2}-\d{2}$/.test(word)) return day(word);
-  return `Couldn't read "${word}". Try /recap, /recap week, /recap month, or /recap 2026-08.`;
+  const phrase = words.join(' ');
+  const d = resolveDate(phrase, today, addDays);
+  return d ? day(d) : `Couldn't read "${phrase}". Try /recap, /recap week, /recap month, or /recap 2026-08.`;
 }
 
 /**
@@ -600,8 +615,7 @@ export async function interest(db: Db, accounts: Account[], arg: string, today: 
   const credited = parseAmount(m[2]);
   if (credited == null || credited <= 0) return { text: `Couldn't read "${m[2]}" as an amount.` };
   const date = resolveDate(m[3] ?? null, today, addDays);
-  if (date == null)
-    return { text: `Couldn't read "${m[3]}" as a date. Use 2026-09-02, "yesterday" or "3 days ago".` };
+  if (date == null) return { text: badDate(m[3]) };
   if (dayDiff(date, today) < 0) return { text: `${date} has not happened yet.` };
 
   // The SAME booking rule every other money row goes through, and for the same reason: the

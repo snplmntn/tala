@@ -647,8 +647,8 @@ test('a date that cannot be read is refused by name, never filed under today', a
   const db = await fresh();
   const accounts = await db.accounts();
   assert.match(
-    (await runCommand(db, accounts, '/interest maya 21.48 last monday', '2026-09-03'))!.text,
-    /Couldn't read "last monday" as a date/,
+    (await runCommand(db, accounts, '/interest maya 21.48 the other day', '2026-09-03'))!.text,
+    /Couldn't read "the other day" as a date/,
   );
   assert.match(
     (await runCommand(db, accounts, '/interest maya 21.48 2026-09-10', '2026-09-03'))!.text,
@@ -886,6 +886,24 @@ test('a month totals by category, and `list` asks for the rows instead', async (
   const items = (await runCommand(db, accounts, '/recap month list', '2026-09-03'))!.text;
   assert.match(items, /starbucks/);
   assert.doesNotMatch(items, /food\s+₱485/, 'one shape or the other, never both');
+});
+
+test('a day you can put on an expense is a day you can recap', async () => {
+  // These were two independent grammars over ONE field. "3 days ago" dated a purchase fine and
+  // reached the recap as the bare word "3"; "month" was a period here and a date nowhere. The
+  // recap now hands anything that is not a period straight to resolveDate, so the two can no
+  // longer drift apart. Thursday 2026-09-03 throughout.
+  const db = await fresh();
+  const accounts = await db.accounts();
+  const at = async (arg: string) => (await runCommand(db, accounts, `/recap ${arg}`, '2026-09-03'))!.text;
+
+  assert.match(await at('3 days ago'), /Mon 2026-08-31/);
+  assert.match(await at('last tuesday'), /Tue 2026-09-01/);
+  assert.match(await at('sep 1'), /Tue 2026-09-01/);
+  assert.match(await at('last month'), /2026-08/);
+  // "last" in front of a period is the period's modifier; in front of a weekday it is the
+  // day's. Both readings live in the same function and must not eat each other.
+  assert.match(await at('last week'), /week of 2026-08-24/);
 });
 
 test('recap says what it could not read, rather than answering for the wrong period', async () => {

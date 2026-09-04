@@ -39,6 +39,7 @@ import {
   unsettled,
   type Event,
 } from '../src/ledger.ts';
+import { resolveDate } from '../src/extract.ts';
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -704,4 +705,33 @@ test('a row reports on the day it was typed only when an anchor pushed it forwar
   // The daily 8-hour window the whole design keys on: 16:30Z is already tomorrow in Manila.
   assert.equal(at('2026-09-03T16:30:00Z', '2026-09-04'), '2026-09-04', 'typed after Manila midnight');
   assert.equal(at('2026-09-03T15:00:00Z', '2026-09-04'), '2026-09-03', 'typed at 23:00 Manila');
+});
+
+test('resolveDate reads every format the schema promises the model, and refuses the rest', () => {
+  // The bug this pins: the date_hint description advertised "sep 1" and "last monday" while
+  // the parser knew neither, and the expense path turned that null into today. Silently.
+  const on = (hint: string) => resolveDate(hint, '2026-09-03', addDays); // a Thursday
+
+  assert.equal(on('today'), '2026-09-03');
+  assert.equal(on('yesterday'), '2026-09-02');
+  assert.equal(on('3 days ago'), '2026-08-31');
+  assert.equal(on('2026-08-14'), '2026-08-14');
+
+  // The most recent one STRICTLY before today, which is the only reading that makes "last
+  // thursday" said on a Thursday mean a week ago instead of this morning.
+  assert.equal(on('last tuesday'), '2026-09-01');
+  assert.equal(on('tuesday'), '2026-09-01');
+  assert.equal(on('tues'), '2026-09-01');
+  assert.equal(on('thursday'), '2026-08-27');
+
+  // Either order, and the year is inferred backwards: a date you type already happened.
+  assert.equal(on('sep 1'), '2026-09-01');
+  assert.equal(on('1 september'), '2026-09-01');
+  assert.equal(on('dec 25'), '2025-12-25');
+
+  // Impossible days are refused rather than rolled forward into a day nobody typed.
+  assert.equal(on('feb 31'), null);
+  assert.equal(on('2026-02-31'), null);
+  assert.equal(on('the other day'), null);
+  assert.equal(on('sometime last week'), null);
 });

@@ -13,7 +13,7 @@ import { randomUUID } from 'node:crypto';
 import { Db, type Account } from './db.ts';
 import { CATEGORIES, resolveDate, type Extracted } from './extract.ts';
 import { addDays, bookingDate, lateEntryPair, parseAmount, peso, type Event } from './ledger.ts';
-import { acct, nowIso, rowKeys, type Reply } from './reply.ts';
+import { acct, badDate, nowIso, rowKeys, type Reply } from './reply.ts';
 import { balanceFor, learnFromCredit, remaining, remainingFor } from './reports.ts';
 
 export async function money(
@@ -44,9 +44,13 @@ export async function money(
   const finalAmount = isRefund ? Math.abs(amount) : signed;
 
   const anchor = await db.latestSnapshot(account.id);
-  // `?? today` on purpose: a rejected expense is worse than a mis-dated one, and the note
-  // keeps whatever the model actually read.
-  const occurred = resolveDate(e.date_hint, ctx.today, addDays) ?? ctx.today;
+  // Refused by name, not defaulted to today. This used to be `?? today` on the argument that a
+  // rejected expense is worse than a mis-dated one — true only while an unreadable hint was
+  // rare, and it was not: the schema advertised "sep 1" and "last monday" to the model and the
+  // parser knew neither, so every dated catch-up silently landed on the day it was typed. A
+  // retype costs you five seconds; a wrong date costs you a month of not knowing.
+  const occurred = resolveDate(e.date_hint, ctx.today, addDays);
+  if (occurred == null) return { text: badDate(e.date_hint) };
   const { date, lateFor } = bookingDate(occurred, anchor?.as_of_date ?? null);
 
   const base = {
@@ -131,7 +135,10 @@ export async function transfer(
   // transfers broken. One message carrying two transfers does exactly that.
   const tid = `t${randomUUID().slice(0, 8)}`;
   const fee = parseAmount(e.fee);
-  const occurred = resolveDate(e.date_hint, ctx.today, addDays) ?? ctx.today;
+  // Same refusal as money(): a transfer books two legs against two anchors, so a wrong date
+  // here moves the wrong balance twice.
+  const occurred = resolveDate(e.date_hint, ctx.today, addDays);
+  if (occurred == null) return { text: badDate(e.date_hint) };
   const common = { inbox_id: ctx.inboxId, logged_at: nowIso(), transfer_id: tid };
 
   // Booked PER LEG, because the two accounts have their own anchors. This used to write both
