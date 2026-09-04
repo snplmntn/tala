@@ -397,6 +397,13 @@ export async function extract(
  * No json_schema and no strict mode, unlike extract(). There is no shape to constrain: the
  * output is prose, and the only thing that could go wrong with it is being wrong, which a
  * schema does not check.
+ *
+ * It may do arithmetic, which extract() may never do, and the difference is not inconsistency:
+ * a figure produced here is read once and thrown away, while a figure produced there becomes a
+ * row. The gate is on the INPUTS — every operand has to be printed in the report or the facts
+ * block — because that is the part a reader can check by eye against the table above it. A
+ * blanket ban was the first shape and it was wrong: it refused "anchor minus that dinner" while
+ * both figures sat on screen, which is not caution, it is a calculator that will not add.
  */
 export async function answer(
   apiKey: string,
@@ -412,9 +419,12 @@ export async function answer(
     'RULES:',
     '- Lead with the answer. Start with Yes or No ONLY for an actual yes/no question: a "why" or',
     '  "how" answer opening with No reads as contradicting something nobody said.',
-    '- NEVER state a figure that is not already in the report or the facts, and never add, subtract',
-    '  or convert anything, however trivial. If the number they want is not there, say you cannot',
-    '  see it rather than working it out.',
+    '- NEVER state a figure that is not in the report or the facts, and never convert a currency.',
+    '- You MAY do arithmetic, but ONLY when every input is a figure printed in the report or the',
+    '  facts: a row taken off a balance, two rows added, a difference between two figures. Name the',
+    '  figures you used. Call the result a calculation, not a balance: nothing in the ledger moved.',
+    '- If an input is missing, say which one and stop. Never estimate it and never carry a figure',
+    '  in from memory.',
     '- The report names the period in its own first line, so never say you cannot tell which',
     '  days it covers, and never doubt a figure printed in it.',
     '- Do not re-list the table. Say the one thing it does not say. Two or three sentences, no',
