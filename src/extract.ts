@@ -207,6 +207,8 @@ function schema(accountIds: string[]) {
               ...nullableString,
               description:
                 'the amount exactly as written, e.g. "250", "1,234.56". Never computed or converted. ' +
+                'An expression is copied WHOLE, both sides included — "299 x 3", "15.34 + 6.76" — and never ' +
+                'added up or shortened to one term: code does the arithmetic on integer centavos. ' +
                 'Null when the message states no amount: never estimated from the merchant.',
             },
             account: {
@@ -536,11 +538,16 @@ const realDay = (iso: string): string | null =>
  * when an unreadable hint was rare; once the schema was advertising two unreadable formats it
  * stopped being rare, and a silently mis-dated expense is the one error you cannot spot by
  * reading the reply back.
+ *
+ * `hour` is the Manila hour now, injected the same way `addDays` is: this file imports nothing,
+ * which is what makes it the one adapter you swap when the provider changes. It exists because
+ * a hint can be a duration ("18 hours ago") rather than a day, and a duration needs the clock.
  */
 export function resolveDate(
   hint: string | null,
   today: string,
   addDays: (d: string, n: number) => string,
+  hour: number,
 ): string | null {
   if (!hint) return today;
   const h = hint.trim().toLowerCase().replace(/[.,]/g, '');
@@ -548,6 +555,29 @@ export function resolveDate(
   if (h === 'yesterday') return addDays(today, -1);
   const ago = h.match(/^(\d+)\s*days?\s*ago$/);
   if (ago) return addDays(today, -Number(ago[1]));
+
+  // "18 hours ago" is not a format anybody types — it is what a bank app's transaction card
+  // says, and a screenshot of one is the most common way a credit gets reported. The model
+  // transcribes what it reads, so this is the only place the clock can be applied.
+  //
+  // The hint is a DURATION, so the civil date it lands on depends on the time of day: 18
+  // hours before 3am is yesterday and 18 hours before 11pm is this morning. `hour` is the
+  // Manila hour now, which is why the day offset is arithmetic rather than a lookup.
+  //
+  // Minutes and seconds go through the same arithmetic instead of being read as "today",
+  // because "40 minutes ago" at 00:20 is also yesterday.
+  const clock = h.match(
+    /^(?:(\d+|an?)\s*(h|hr|hour|m|min|minute|s|sec|second)s?\s+ago|just now|a moment ago)$/,
+  );
+  if (clock) {
+    const n = clock[1] == null ? 0 : /^\d+$/.test(clock[1]) ? Number(clock[1]) : 1;
+    const unit = clock[2] ?? 'h';
+    const hours = unit.startsWith('h') ? n : unit.startsWith('m') ? n / 60 : n / 3600;
+    // Only the hour is known, not the minute, so this floors the elapsed part of today and
+    // rounds the answer BACKWARDS. An hour of slop lands on the earlier day, which is the
+    // side a credit reported at 3am belongs on anyway.
+    return addDays(today, -Math.max(0, Math.ceil((hours - hour) / 24)));
+  }
   if (/^\d{4}-\d{2}-\d{2}$/.test(h)) return realDay(h);
 
   // The most recent one STRICTLY before today. One rule covers both wordings, and it is what

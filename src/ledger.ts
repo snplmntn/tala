@@ -17,22 +17,45 @@
  */
 export function parseAmount(raw: string | null | undefined): number | null {
   if (!raw) return null;
+  // Trimmed ONCE, up front: every branch below anchors on ^ and $, so a stray space from a
+  // split term ("299 x 3 + 50") or a fat-fingered message failed the match instead of parsing.
+  const text = String(raw).trim();
 
   // "299 x 3" — three of the same thing, which is how a group order gets typed. The
   // extractor is FORBIDDEN from multiplying it out (see extract.ts: it transcribes, code
   // computes), so the arithmetic has to happen here, on integer centavos, where a misread
   // is a refused message rather than a wrong balance. Order does not matter: multiplication
   // is commutative and only one side is scaled, so "3 x 299" gives the same 89,700.
-  const qty = String(raw).match(/^(.+?)\s*[x*\u00d7]\s*(\d{1,3})$/i);
+  const qty = text.match(/^(.+?)\s*[x*\u00d7]\s*(\d{1,3})$/i);
   if (qty) {
     const unit = parseAmount(qty[1]);
     const out = unit == null ? null : unit * Number(qty[2]);
     return out != null && Number.isSafeInteger(out) ? out : null;
   }
 
-  let s = String(raw)
-    .trim()
+  // "15.34 + 6.76" — one day's interest credited as a base line and a boosted line, which is
+  // how the bank app shows it and therefore how it gets reported. Same division of labour as
+  // the quantity clause: the extractor transcribes the expression, the arithmetic happens
+  // HERE on integer centavos. Runs after `x` so "299 x 3 + 50" resolves term by term.
+  //
+  // EVERY term must parse or the whole sum is refused, because the failure that matters is a
+  // half-read sum: "15.34 + 6.76" quietly booking 15.34 is a credit short by 6.76 that reads
+  // as correct in the reply, and the rate learner then infers a rate from it.
+  const terms = text.replace(/^\+/, '').split('+');
+  if (terms.length > 1) {
+    let total = 0;
+    for (const t of terms) {
+      const v = parseAmount(t);
+      if (v == null) return null;
+      total += v;
+    }
+    return Number.isSafeInteger(total) ? total : null;
+  }
+
+  let s = text
     .toLowerCase()
+    // A card writes a credit as "+₱15.34", and a leading sign is not a sum.
+    .replace(/^\+/, '')
     // `php` before the bare `p`, or the alternation eats the leading p and leaves "hp".
     .replace(/php|pesos?|[₱p]/g, '')
     .replace(/,/g, '')

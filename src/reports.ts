@@ -23,6 +23,7 @@ import {
   lastDayOfMonth,
   lateEntryPair,
   learnRate,
+  manilaHour,
   monthOf,
   owedRows,
   parseAmount,
@@ -359,7 +360,7 @@ function recapWindow(arg: string, today: string): Window | string {
     };
   }
   const phrase = words.join(' ');
-  const d = resolveDate(phrase, today, addDays);
+  const d = resolveDate(phrase, today, addDays, manilaHour(new Date()));
   return d ? day(d) : `Couldn't read "${phrase}". Try /recap, /recap week, /recap month, or /recap 2026-08.`;
 }
 
@@ -686,7 +687,13 @@ export async function interest(db: Db, accounts: Account[], arg: string, today: 
   // The date group is greedy so an unreadable hint ("last monday") reaches resolveDate and
   // is REFUSED by name, instead of failing the match and printing a usage line that does
   // not mention the thing that was wrong.
-  const m = trimmed.match(/^([a-z]+)\s+([\d,.]+)(?:\s+(.+))?$/i);
+  //
+  // The AMOUNT group has to claim a whole expression for that greed to be safe. A bare
+  // `[\d,.]+` stopped at the first number, so "maya 15.34 + 6.76 sept 4" handed
+  // "+ 6.76 sept 4" to the date parser and refused a perfectly good sum as a bad date —
+  // and the two lines a bank credits in one day are exactly how a real credit gets typed.
+  // parseAmount owns the arithmetic; this only decides where the amount ends.
+  const m = trimmed.match(/^([a-z]+)\s+([\d,.]+(?:\s*[+x*×]\s*[\d,.]+)*)(?:\s+(.+))?$/i);
   if (!m) {
     const earning = accounts.filter((a) => a.rate > 0).map((a) => a.id);
     return {
@@ -698,7 +705,7 @@ export async function interest(db: Db, accounts: Account[], arg: string, today: 
   if (!account) return { text: noAccount(m[1], accounts) };
   const credited = parseAmount(m[2]);
   if (credited == null || credited <= 0) return { text: `Couldn't read "${m[2]}" as an amount.` };
-  const date = resolveDate(m[3] ?? null, today, addDays);
+  const date = resolveDate(m[3] ?? null, today, addDays, manilaHour(new Date()));
   if (date == null) return { text: badDate(m[3]) };
   if (dayDiff(date, today) < 0) return { text: `${date} has not happened yet.` };
 

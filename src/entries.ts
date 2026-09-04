@@ -12,7 +12,7 @@ import { randomUUID } from 'node:crypto';
 
 import { Db, type Account } from './db.ts';
 import { CATEGORIES, resolveDate, type Extracted } from './extract.ts';
-import { addDays, bookingDate, lateEntryPair, parseAmount, peso, type Event } from './ledger.ts';
+import { addDays, bookingDate, lateEntryPair, manilaHour, parseAmount, peso, type Event } from './ledger.ts';
 import { acct, badDate, nowIso, rowKeys, type Reply } from './reply.ts';
 import { balanceFor, learnFromCredit, remaining, remainingFor } from './reports.ts';
 
@@ -49,7 +49,7 @@ export async function money(
   // rare, and it was not: the schema advertised "sep 1" and "last monday" to the model and the
   // parser knew neither, so every dated catch-up silently landed on the day it was typed. A
   // retype costs you five seconds; a wrong date costs you a month of not knowing.
-  const occurred = resolveDate(e.date_hint, ctx.today, addDays);
+  const occurred = resolveDate(e.date_hint, ctx.today, addDays, manilaHour(new Date()));
   if (occurred == null) return { text: badDate(e.date_hint) };
   const { date, lateFor } = bookingDate(occurred, anchor?.as_of_date ?? null);
 
@@ -137,7 +137,7 @@ export async function transfer(
   const fee = parseAmount(e.fee);
   // Same refusal as money(): a transfer books two legs against two anchors, so a wrong date
   // here moves the wrong balance twice.
-  const occurred = resolveDate(e.date_hint, ctx.today, addDays);
+  const occurred = resolveDate(e.date_hint, ctx.today, addDays, manilaHour(new Date()));
   if (occurred == null) return { text: badDate(e.date_hint) };
   const common = { inbox_id: ctx.inboxId, logged_at: nowIso(), transfer_id: tid };
 

@@ -104,6 +104,16 @@ test('parseAmount reads what people actually type, and refuses what it cannot re
   assert.equal(parseAmount('12.50 x 2'), 2_500);
   assert.equal(parseAmount('a lot x 3'), null);
 
+  // "15.34 + 6.76" is one day of interest credited as a base line and a boosted line. Every
+  // term has to parse or the sum is refused: a half-read sum books a credit that is short
+  // while the reply reads correct, and the rate learner then believes the short figure.
+  assert.equal(parseAmount('15.34 + 6.76'), 2_210);
+  assert.equal(parseAmount('1+2+3'), 600);
+  assert.equal(parseAmount('299 x 3 + 50'), 94_700);
+  assert.equal(parseAmount('+₱15.34'), 1_534); // a card writes a credit with a leading sign
+  assert.equal(parseAmount('15.34 + '), null);
+  assert.equal(parseAmount('15.34 + a lot'), null);
+
   // Refuse rather than guess: a silently wrong amount is indistinguishable from
   // forgotten spending once it lands in the drift row.
   assert.equal(parseAmount('a lot'), null);
@@ -723,7 +733,7 @@ test('a row reports on the day it was typed only when an anchor pushed it forwar
 test('resolveDate reads every format the schema promises the model, and refuses the rest', () => {
   // The bug this pins: the date_hint description advertised "sep 1" and "last monday" while
   // the parser knew neither, and the expense path turned that null into today. Silently.
-  const on = (hint: string) => resolveDate(hint, '2026-09-03', addDays); // a Thursday
+  const on = (hint: string) => resolveDate(hint, '2026-09-03', addDays, 15); // a Thursday, 3pm
 
   assert.equal(on('today'), '2026-09-03');
   assert.equal(on('yesterday'), '2026-09-02');
@@ -747,6 +757,20 @@ test('resolveDate reads every format the schema promises the model, and refuses 
   assert.equal(on('2026-02-31'), null);
   assert.equal(on('the other day'), null);
   assert.equal(on('sometime last week'), null);
+
+  // A bank app's transaction card says "18 hours ago", the model transcribes what it reads,
+  // and a duration only becomes a date once you know the time of day. At 3am, 18 hours ago
+  // is yesterday morning; at 11pm the same phrase is this morning.
+  const at3am = (hint: string) => resolveDate(hint, '2026-09-03', addDays, 3);
+  const at11pm = (hint: string) => resolveDate(hint, '2026-09-03', addDays, 23);
+  assert.equal(at3am('18 hours ago'), '2026-09-02');
+  assert.equal(at11pm('18 hours ago'), '2026-09-03');
+  assert.equal(at3am('30 hours ago'), '2026-09-01');
+  assert.equal(at3am('an hour ago'), '2026-09-03');
+  assert.equal(at3am('just now'), '2026-09-03');
+  // Minutes cross midnight too, which is why they are not simply read as today.
+  assert.equal(resolveDate('40 minutes ago', '2026-09-03', addDays, 0), '2026-09-02');
+  assert.equal(at3am('40 minutes ago'), '2026-09-03');
 });
 
 /**
