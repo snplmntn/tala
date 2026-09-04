@@ -170,6 +170,7 @@ You can type these as commands or just say them.
 | `/recap week`                      | Monday to today, grouped by day   |
 | `/recap month` or `/recap 2026-08` | a whole month, by category        |
 | `/recap last month`                | the previous month                |
+| `/recap business`                  | the business books instead        |
 | `/owed` or "who owes me"           | money you fronted                 |
 | `/csv`                             | the whole ledger as a spreadsheet |
 
@@ -188,7 +189,14 @@ You can type these as commands or just say them.
 /recap last month       the previous month
 /recap 2026-08          a past month, by category
 /recap month list       a month as individual rows instead
+/recap business         today, business books
+/recap month business   the business month, by category
 ```
+
+**The recap answers for one set of books at a time.** It defaults to personal, and `business`
+anywhere in the argument switches it. Spoken, you never type the word: naming an account does
+it, so "what did gotyme spend this month" reads the business books because GoTyme is a
+business account. Mixing the two would make every total answer a question nobody asked.
 
 **Any day you can put on a purchase, you can recap.** "last tuesday", "3 days ago" and
 "sep 1" mean the same thing whether you are dating an expense or asking for a day's rows —

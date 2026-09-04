@@ -77,7 +77,11 @@ export async function applyEvent(
       // and "what did I spend today" both reach a bare /recap, which answers for today —
       // so the spoken path would silently be able to ask only one of the two questions.
       const period = kind === 'recap' && e.date_hint ? ` ${e.date_hint}` : '';
-      const report = (await runCommand(db, accounts, `/${kind}${period}`, ctx.today)) ?? {
+      // The BOOK rides along the same way, derived from whichever account was named rather
+      // than asked for as its own field: "what did gotyme spend this month" is the way anyone
+      // actually says it, and the extractor is already filling `account` with a real id.
+      const book = kind === 'recap' ? ` ${acct(accounts, e.account)?.book ?? ''}`.trimEnd() : '';
+      const report = (await runCommand(db, accounts, `/${kind}${period}${book}`, ctx.today)) ?? {
         text: 'Ask me /balance or /recap.',
       };
       return withAnswer(db, accounts, e, report, ctx);

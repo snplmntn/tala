@@ -906,6 +906,49 @@ test('a day you can put on an expense is a day you can recap', async () => {
   assert.match(await at('last week'), /week of 2026-08-24/);
 });
 
+test('the recap can be asked of the business books, typed or spoken', async () => {
+  // /balance has always split on book; the recap hard-filtered to personal, so every business
+  // row was invisible in every period. Asking "what did gotyme spend" returned a personal
+  // recap reading "nothing logged", which is a true sentence about the wrong question.
+  const db = await fresh();
+  const accounts = await db.accounts();
+  await db.run(
+    `INSERT INTO events (type, book, account_id, amount_centavos, category, merchant, occurred_at, logged_at)
+     VALUES ('expense','business','gotyme',-89700,'food','company dinner','2026-09-03','2026-09-03T02:00:00Z')`,
+  );
+  await anExpense(db, { date: '2026-09-03', amt: -25000, cat: 'food', merch: 'starbucks' });
+
+  const personal = (await runCommand(db, accounts, '/recap', '2026-09-03'))!.text;
+  assert.match(personal, /· personal/);
+  assert.match(personal, /starbucks/);
+  assert.doesNotMatch(personal, /company dinner/, 'the default recap is unchanged');
+
+  const business = (await runCommand(db, accounts, '/recap business', '2026-09-03'))!.text;
+  assert.match(business, /· business/);
+  assert.match(business, /company dinner/);
+  assert.match(business, /spent\s+₱897\.00/);
+  assert.doesNotMatch(business, /starbucks/, 'one book at a time, or neither total means anything');
+
+  // The book is a word in the argument, so it composes with a period rather than needing its
+  // own flag ordering.
+  assert.match(
+    (await runCommand(db, accounts, '/recap month business', '2026-09-03'))!.text,
+    /2026-09 · business/,
+  );
+
+  // Spoken, the book is derived from whichever account was named: no new schema field, and
+  // "what did gotyme spend" is how the question actually gets asked.
+  const inboxId = await db.claim({ update_id: 91, has_photo: false, now: '2026-09-03T03:00:00Z' });
+  const spoken = await applyEvent(
+    db,
+    accounts,
+    spokenEvent({ intent: 'query', query_kind: 'recap', account: 'gotyme' }),
+    { inboxId: inboxId!, today: '2026-09-03', hadPhoto: false },
+  );
+  assert.match(spoken.text, /· business/);
+  assert.match(spoken.text, /company dinner/);
+});
+
 test('recap says what it could not read, rather than answering for the wrong period', async () => {
   const db = await fresh();
   const accounts = await db.accounts();
@@ -1125,6 +1168,55 @@ test('a transfer books per leg, so the anchor day does not swallow it', async ()
   // And it is still a well-formed transfer: the offsets are adjustments, so the pair of legs
   // brokenTransfers() checks still nets to zero.
   assert.doesNotMatch(await balances(db, accounts, '2026-09-03'), /broken transfer/);
+});
+
+test('a purchase from before the anchor is not subtracted twice, however you say the date', async () => {
+  // The late-entry pair has always done this; reaching it required an ISO date, because
+  // "last tuesday" resolved to null and the expense path filed it under today as an ordinary
+  // flow. So the one wording anybody uses for a pre-anchor catch-up was the one that
+  // double-counted it.
+  const db = await fresh();
+  const accounts = await db.accounts();
+  await anchorAccount(
+    db,
+    accounts.find((a) => a.id === 'gotyme')!,
+    1_975_858,
+    '2026-09-03',
+  );
+  const before = await balances(db, accounts, '2026-09-04');
+
+  const inboxId = await db.claim({ update_id: 92, has_photo: false, now: '2026-09-04T02:00:00Z' });
+  const reply = await applyEvent(
+    db,
+    accounts,
+    spokenEvent({
+      intent: 'expense',
+      amount: '299 x 3',
+      account: 'gotyme',
+      merchant: 'company dinner',
+      category: 'food',
+      date_hint: 'last tuesday',
+    }),
+    { inboxId: inboxId!, today: '2026-09-04', hadPhoto: false },
+  );
+
+  // Friday 2026-09-04 back to Tuesday 2026-09-01, which is behind the 09-03 anchor.
+  assert.match(reply.text, /late entry for 2026-09-01, balance unchanged/);
+  // No figure in the reply itself: a row still carrying live buttons is provisional, and the
+  // balance is stated on the confirming tap. The books are what this asserts against.
+  assert.equal(await balances(db, accounts, '2026-09-04'), before, 'the anchor already held it');
+
+  // Where it LANDS is the open period, not Tuesday: the month the money actually left has
+  // already been reconciled and its drift absorbed, so re-opening it would make history move.
+  // The row carries the true day in its note instead, and the offsetting adjustment says
+  // where the money came from. Reconciliation date and shopping date are not the same date.
+  assert.doesNotMatch(
+    (await runCommand(db, accounts, '/recap 2026-09-01 business', '2026-09-04'))!.text,
+    /company dinner/,
+  );
+  const open = (await runCommand(db, accounts, '/recap 2026-09-04 business', '2026-09-04'))!.text;
+  assert.match(open, /company dinner/);
+  assert.match(open, /spent\s+₱897\.00/, 'the category total gains it, the balance does not');
 });
 
 test('the 08:00 close-out confirms what you slept on, and nothing from today', async () => {

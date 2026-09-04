@@ -230,6 +230,8 @@ interface Window {
   label: string;
   items: boolean;
   byDay: boolean;
+  /** Which set of books. /balance has always split on this; the recap never did. */
+  book: 'personal' | 'business';
 }
 
 /** A cap, not a page: past this the rows stop being readable and /csv is the right tool. */
@@ -259,7 +261,11 @@ function recapWindow(arg: string, today: string): Window | string {
     .split(/\s+/)
     .filter((w) => w && w !== 'this');
   const force = parts.includes('list') || parts.includes('all');
-  const words = parts.filter((w) => w !== 'list' && w !== 'all');
+  // The book is a WORD in the same argument, not a flag: "recap month business" reads the way
+  // you would say it, and the spoken path can hand over the book of whichever account was
+  // named without a second parameter to thread through runCommand.
+  const book = parts.includes('business') ? 'business' : 'personal';
+  const words = parts.filter((w) => !['list', 'all', 'business', 'personal'].includes(w));
   // "last" is a period modifier here and a day modifier in resolveDate ("last tuesday"), so it
   // is claimed ONLY in front of a period word and otherwise travels on with the phrase.
   const prev = words[0] === 'last' && (words[1] === 'week' || words[1] === 'month');
@@ -270,6 +276,7 @@ function recapWindow(arg: string, today: string): Window | string {
     label: `${DAY_NAME(d)} ${d}`,
     items: true,
     byDay: false,
+    book,
   });
 
   if (!word) return day(today);
@@ -277,12 +284,26 @@ function recapWindow(arg: string, today: string): Window | string {
     // Monday to TODAY, not Monday to Sunday: days that have not happened are not a recap.
     // A PAST week is whole, because all seven of its days have happened.
     const from = prev ? addDays(startOfWeek(today), -7) : startOfWeek(today);
-    return { from, to: prev ? addDays(from, 6) : today, label: `week of ${from}`, items: true, byDay: true };
+    return {
+      from,
+      to: prev ? addDays(from, 6) : today,
+      label: `week of ${from}`,
+      items: true,
+      byDay: true,
+      book,
+    };
   }
   if (word === 'month' || /^\d{4}-\d{2}$/.test(word)) {
     // Day 0 of this month is the last day of the previous one, so no month-length table.
     const m = word !== 'month' ? word : prev ? monthOf(addDays(`${monthOf(today)}-01`, -1)) : monthOf(today);
-    return { from: `${m}-01`, to: `${m}-${lastDayOfMonth(`${m}-01`)}`, label: m, items: force, byDay: false };
+    return {
+      from: `${m}-01`,
+      to: `${m}-${lastDayOfMonth(`${m}-01`)}`,
+      label: m,
+      items: force,
+      byDay: false,
+      book,
+    };
   }
   const phrase = words.join(' ');
   const d = resolveDate(phrase, today, addDays);
@@ -307,23 +328,31 @@ export async function recap(db: Db, arg: string, today: string): Promise<string>
     const d = reportDate(r);
     return dayDiff(w.from, d) >= 0 && dayDiff(d, w.to) >= 0;
   });
-  const personal = rows.filter((r) => r.book === 'personal');
-  const live = effective(personal);
+  const inBook = rows.filter((r) => r.book === w.book);
+  const live = effective(inBook);
   // Carrying `day` on the row keeps the grouping, the sort and the window on ONE date.
   const expenses = live
     .filter((r) => r.type === 'expense')
     .map((r) => ({ ...r, day: reportDate(r) }))
     .sort((a, b) => a.day.localeCompare(b.day) || a.id - b.id);
 
-  const cats = [...spendByCategory(personal)].sort((a, b) => b[1] - a[1]);
+  const cats = [...spendByCategory(inBook)].sort((a, b) => b[1] - a[1]);
   const spend = cats.reduce((t, [, v]) => t + v, 0);
   const income = sum(live.filter((r) => r.type === 'income'));
   const earned = sum(live.filter((r) => r.type === 'interest' || r.type === 'cashback'));
-  const contributed = sum(
-    effective(rows).filter((r) => r.type === 'transfer' && r.book === 'business' && r.amount_centavos > 0),
-  );
+  // Only on the personal recap: "you put this much INTO the business" is a sentence about the
+  // money that left here. Read from the business side it is just the income already totalled
+  // above, said twice.
+  const contributed =
+    w.book === 'personal'
+      ? sum(
+          effective(rows).filter(
+            (r) => r.type === 'transfer' && r.book === 'business' && r.amount_centavos > 0,
+          ),
+        )
+      : 0;
 
-  const out = [`${w.label} · personal`];
+  const out = [`${w.label} · ${w.book}`];
   // 18, not 15: "pup icog document" truncated to "pup icog docume", which reads as broken
   // rather than as abbreviated. The block is still narrower than the balance table.
   const row = (label: string, amount: number, tail = '') =>
@@ -363,7 +392,9 @@ export async function recap(db: Db, arg: string, today: string): Promise<string>
       `contributed ${peso(contributed)} to the business, buffer moving ${peso(income - spend - contributed)}`,
     );
   }
-  const owed = unsettled(rows);
+  // Scoped to the book, like everything else here: what a client owes the company is not an
+  // answer to what your friends owe you.
+  const owed = unsettled(inBook);
   if (owed > 0) out.push('', `owed to you: ${peso(owed)}`);
 
   // No "you anchored today, so it books to tomorrow" caveat any more: reportDate is what
