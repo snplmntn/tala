@@ -79,12 +79,22 @@ turso db tokens create tala     # -> TURSO_TOKEN (a long JWT; shown once)
 
 ## 2. Groq — the extraction key
 
-Groq's free tier for `qwen/qwen3.8-27b` is 30 requests/minute, 1,000/day, 8,000 tokens/minute
-and **200,000 tokens/day**. The token budget is the one that binds: every call carries the
-system prompt plus the JSON schema, so a message costs 2,799 tokens however short it is —
-about 71 messages a day, not 1,000. At ~45 a day you are near two thirds of it, and a
-receipt-photo-heavy month is the one that gets close. The model does text _and_ receipt
-photos with strict JSON schema output on the same endpoint.
+Groq's free tier for `qwen/qwen3.8-27b` binds on **input tokens per minute: 7,000, per
+model**. Not the 8,000 the response headers advertise as `x-ratelimit-limit-tokens` — that is
+a looser counter, and the real limit only names itself in the body of a 413:
+
+```
+Request too large for model `qwen/qwen3.8-27b` ... on input tokens per minute (ITPM):
+Limit 7000, Requested 12012, please reduce your message size
+```
+
+Input only, so a reply costs nothing against it and this is a prompt-size budget. Every call
+carries the system prompt plus the JSON schema, so a message costs 1,426 tokens however short
+it is: **four messages a minute**, and about 140 a day against the 200,000/day ceiling. A
+human typing never notices four a minute; a catch-up drain does, which is why `PACE_MS` and
+`RETRY_PER_TICK` in `index.ts` are derived from that figure and reserve half of it for
+whatever you type while a backlog is draining. The model does text _and_ receipt photos with
+strict JSON schema output on the same endpoint.
 
 Two things spend less than that figure suggests. A bare report word (`balance`, `recap`,
 `owed`, `export`) is answered by code and never reaches the model, so the messages you send

@@ -226,11 +226,21 @@ async function handle(u: Update): Promise<boolean> {
     await db.markInbox(inboxId, 'parsed', { model: parsed.model, raw: parsed.raw });
   } catch (e) {
     // Deferred, not lost. The raw text is on disk and /retry replays it.
+    //
+    // LOGGED in full, which it was not, and that is why a rate limit went undiagnosed for a
+    // day: the only copies of the provider's message were a row in a table nobody reads and a
+    // chat message cut at 80 characters — which lands mid-word in the model id, just before
+    // "on input tokens per minute (ITPM): Limit 7000". The clause naming the limit and the
+    // size that broke it is the entire content of the error, and both numbers sat past the cut.
+    log('extract failed, deferred', inboxId, String(e));
     await db.markInbox(inboxId, 'deferred', { error: String(e).slice(0, 400) });
+    // Enough to act on, whitespace collapsed so a JSON body does not become six lines in the
+    // chat. Still truncated: this is a message to a person, and the full text is in the log.
+    const why = String(e).replace(/\s+/g, ' ').slice(0, 200);
     await send(
       TOKEN,
       m.chat.id,
-      `Saved your message but couldn't read it yet (${String(e).slice(0, 80)}). It will be retried, nothing is lost.`,
+      `Saved your message but couldn't read it yet (${why}). It will be retried, nothing is lost.`,
     );
     return true; // the call was made and the quota spent, so the drain still paces
   }
@@ -339,26 +349,31 @@ async function timedReminders(): Promise<void> {
 }
 
 /**
- * What one extract() call actually costs, and the two pacing constants that follow from it.
+ * What one extract() call costs, and the limit it is spent against. Both MEASURED, and both
+ * were wrong here before — in ways that cancelled out into a bot that 429s all evening.
  *
- * MEASURED against Groq's own token counter, not estimated: 2,799 of prompt (SYSTEM plus the
- * strict schema, which is half of it) and ~150 of completion. It is here as a constant
- * because both pacing numbers below used to be independent guesses at it — "~1.2k" here and
- * "roughly 1.8k" at PACE_MS, both of them the SYSTEM string alone, counting neither the schema
- * nor the transcript. Each therefore let through about twice what fits, which is why a drain
- * 429s partway and re-defers instead of draining.
+ * The limit is **input** tokens per minute, 7,000, per MODEL. It is not the 8,000 the response
+ * headers advertise as `x-ratelimit-limit-tokens`: that is a looser counter, and trusting it
+ * is what made the sums here come out plausible while being 14% too generous. The real one
+ * only names itself in the body of a 413, which is why it went unseen for so long:
  *
- * The free tier meters tokens per MINUTE per MODEL, and it refills continuously rather than in
- * one lump each minute: spend 14 tokens and the reset header says 105ms, which is exactly
- * 14 / (8000/60). So the sustainable gap between two calls is what it takes to refill one,
- * and the pacing is that division instead of a round number that felt safe.
+ *   Request too large for model `qwen/qwen3.8-27b` ... on input tokens per minute (ITPM):
+ *   Limit 7000, Requested 12012, please reduce your message size
+ *
+ * INPUT only, so a completion costs nothing against it and this is a prompt-size budget.
+ * One call is 1,426 input tokens, so the ceiling is four messages a minute. Before the
+ * prompt was deduplicated it was 2,036, and three.
+ *
+ * The numbers this replaces were guesses at the SYSTEM string ("~1.2k", "roughly 1.8k")
+ * counting neither the schema nor the transcript, and then a measurement that counted the
+ * schema twice and added a completion that is not metered.
  */
-const CALL_TOKENS = 2_950;
-const TPM = 8_000;
+const CALL_INPUT = 1_450;
+const ITPM = 7_000;
 
 /**
  * How long to wait between two messages that both need the extractor: long enough for the
- * bucket to refill one call. See CALL_TOKENS for where the number comes from.
+ * bucket to refill one call. See CALL_INPUT for where the number comes from.
  *
  * This only ever fires while draining a BACKLOG — everything Telegram held while the service
  * was asleep, redeploying or unreachable — because a single message has nothing after it to
@@ -368,10 +383,9 @@ const TPM = 8_000;
  * lost, but the ORDER is: a reply that answers the bot's own question ("maribank", right after
  * being asked which account) gets parsed with its question missing from the transcript, and
  * comes out as something else entirely. That is the cost being paid for here, and it is why
- * the gap is derived rather than picked — 14s was under it, so the drain it exists to protect
- * was still bouncing off the ceiling around the fourth message.
+ * the gap is derived rather than picked.
  */
-const PACE_MS = Math.ceil(CALL_TOKENS / (TPM / 60)) * 1000;
+const PACE_MS = Math.ceil(CALL_INPUT / (ITPM / 60)) * 1000;
 
 /**
  * Retry whatever a provider outage deferred, so nothing sits in the inbox forever.
@@ -381,12 +395,17 @@ const PACE_MS = Math.ceil(CALL_TOKENS / (TPM / 60)) * 1000;
  * tick and lets the scheduler come back — the backlog drains over minutes instead of bouncing
  * off the ceiling every time.
  *
- * The tick is 60s, so this is calls per minute, and the rows are spaced by PACE_MS rather than
- * fired back to back. That spacing is what leaves room for a message the owner types mid-drain:
- * an unused slot would leave the same room, but only if the drain never bursts, and two calls
- * in the same second is a burst whatever the per-minute total says.
+ * HALF the minute's calls, and this is the whole bug the backlog kept alive. It was three,
+ * fired back to back, against a budget of three: one tick took 6,108 of 7,000 input tokens in
+ * a couple of seconds and left 892, less than half a message. So every message typed while a
+ * drain was in flight was refused as too large, was deferred, and became another row for the
+ * next tick to spend the minute on. A backlog, once started, fed itself and never emptied.
+ *
+ * The rows are also spaced by PACE_MS rather than fired back to back. Reserving half the
+ * budget is what makes room for a message the owner types mid-drain; the spacing is what
+ * stops the retained half being spent in one second, which a per-minute total cannot see.
  */
-const RETRY_PER_TICK = Math.floor(TPM / CALL_TOKENS);
+const RETRY_PER_TICK = Math.max(1, Math.floor(ITPM / CALL_INPUT / 2));
 
 async function retryDeferred(): Promise<void> {
   const queue = await db.deferred();
