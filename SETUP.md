@@ -81,8 +81,8 @@ turso db tokens create tala     # -> TURSO_TOKEN (a long JWT; shown once)
 
 Groq's free tier for `qwen/qwen3.8-27b` is 30 requests/minute, 1,000/day, 8,000 tokens/minute
 and **200,000 tokens/day**. The token budget is the one that binds: every call carries the
-system prompt plus the JSON schema, so a message costs 2,662 tokens however short it is —
-about 75 messages a day, not 1,000. At ~45 a day you are near two thirds of it, and a
+system prompt plus the JSON schema, so a message costs 2,799 tokens however short it is —
+about 71 messages a day, not 1,000. At ~45 a day you are near two thirds of it, and a
 receipt-photo-heavy month is the one that gets close. The model does text _and_ receipt
 photos with strict JSON schema output on the same endpoint.
 

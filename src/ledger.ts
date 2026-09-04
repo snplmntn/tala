@@ -647,6 +647,42 @@ export function brokenTransfers(rows: Event[]): string[] {
 }
 
 /** Fronted money nobody has paid back yet. Reported as ONE aggregate, never a chase list. */
+/**
+ * Split a deferred backlog into what to replay and what is a re-send of something already in
+ * it, keeping the FIRST of each text.
+ *
+ * Two identical texts in one backlog are a re-send, not two jeep fares. The reply a 429 sends
+ * back says the text was saved and will be retried, and people re-type anyway — the exchange
+ * this was found in has "mom borrowed 2k maribank" twice for exactly that reason. Both rows
+ * then replay and both book, and a phantom expense is indistinguishable from a real one the
+ * moment it is in the ledger.
+ *
+ * Over the WHOLE queue rather than the two rows a tick replays, because a pair of adjacent
+ * re-sends shares a batch only by luck of alignment, and a coin flip is not a guard on money.
+ *
+ * Here rather than beside the drain because index.ts starts a poll loop the instant it is
+ * imported, so nothing in that file can be tested. A guard on money that cannot be tested is
+ * half a guard.
+ */
+export function dedupeBacklog<T extends { raw_text: string | null }>(
+  rows: T[],
+): { pending: T[]; duplicates: T[] } {
+  const seen = new Set<string>();
+  const pending: T[] = [];
+  const duplicates: T[] = [];
+  for (const row of rows) {
+    // A blank text is not a repeat of the next blank text: there is nothing to compare, and
+    // collapsing them would drop a receipt whose caption was empty.
+    const key = (row.raw_text ?? '').trim().toLowerCase();
+    if (key && seen.has(key)) duplicates.push(row);
+    else {
+      if (key) seen.add(key);
+      pending.push(row);
+    }
+  }
+  return { pending, duplicates };
+}
+
 export function unsettled(rows: Event[]): number {
   return effective(rows)
     .filter((r) => (r.shared_amount_centavos ?? 0) > 0 && !r.settled_at)

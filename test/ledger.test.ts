@@ -22,6 +22,7 @@ import {
   dailyInterest,
   dayDiff,
   daysBetween,
+  dedupeBacklog,
   drift,
   effective,
   flowsByDate,
@@ -751,4 +752,28 @@ test('a bare report word is a command, a sentence containing one is not', () => 
   assert.equal(asCommand('how much did I spend yesterday'), null);
   assert.equal(asCommand('business recap'), null);
   assert.equal(asCommand('250 jollibee maribank'), null);
+});
+
+/**
+ * A phantom expense is indistinguishable from a real one once it is in the ledger, so the
+ * re-send a rate limit provokes must not book twice. The FIRST copy is the one that survives.
+ */
+test('a re-send in the backlog is booked once, and a blank caption is not a repeat', () => {
+  const rows = [
+    { id: 1, raw_text: 'mom borrowed 2k maribank' },
+    { id: 2, raw_text: 'mom borrowed 2k maribank' },
+    { id: 3, raw_text: '  MOM borrowed 2k maribank ' },
+    { id: 4, raw_text: 'lend her 2k' },
+    { id: 5, raw_text: null },
+    { id: 6, raw_text: null },
+  ];
+  const { pending, duplicates } = dedupeBacklog(rows);
+  assert.deepEqual(
+    pending.map((r) => r.id),
+    [1, 4, 5, 6],
+  );
+  assert.deepEqual(
+    duplicates.map((r) => r.id),
+    [2, 3],
+  );
 });

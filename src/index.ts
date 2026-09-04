@@ -12,7 +12,15 @@
 import { createServer } from 'node:http';
 import { Db } from './db.ts';
 import { extract, transcript } from './extract.ts';
-import { addDays, dayDiff, daysBetween, manilaDate, manilaHour, manilaStartOfDay } from './ledger.ts';
+import {
+  addDays,
+  dayDiff,
+  daysBetween,
+  dedupeBacklog,
+  manilaDate,
+  manilaHour,
+  manilaStartOfDay,
+} from './ledger.ts';
 import {
   COMMANDS,
   applyEvent,
@@ -333,7 +341,7 @@ async function timedReminders(): Promise<void> {
 /**
  * What one extract() call actually costs, and the two pacing constants that follow from it.
  *
- * MEASURED against Groq's own token counter, not estimated: 2,692 of prompt (SYSTEM plus the
+ * MEASURED against Groq's own token counter, not estimated: 2,799 of prompt (SYSTEM plus the
  * strict schema, which is half of it) and ~150 of completion. It is here as a constant
  * because both pacing numbers below used to be independent guesses at it — "~1.2k" here and
  * "roughly 1.8k" at PACE_MS, both of them the SYSTEM string alone, counting neither the schema
@@ -345,7 +353,7 @@ async function timedReminders(): Promise<void> {
  * 14 / (8000/60). So the sustainable gap between two calls is what it takes to refill one,
  * and the pacing is that division instead of a round number that felt safe.
  */
-const CALL_TOKENS = 2_850;
+const CALL_TOKENS = 2_950;
 const TPM = 8_000;
 
 /**
@@ -381,22 +389,52 @@ const PACE_MS = Math.ceil(CALL_TOKENS / (TPM / 60)) * 1000;
 const RETRY_PER_TICK = Math.floor(TPM / CALL_TOKENS);
 
 async function retryDeferred(): Promise<void> {
-  const rows = (await db.deferred()).slice(0, RETRY_PER_TICK);
-  if (!rows.length) return;
+  const queue = await db.deferred();
+  if (!queue.length) return;
   const accounts = await db.accounts();
-  for (const [i, row] of rows.entries()) {
+
+  // Announced, never silent. If it really was two jeep fares, the second is one retype away,
+  // and a peso you were told was dropped is recoverable in a way a phantom one is not.
+  const { pending, duplicates } = dedupeBacklog(queue);
+  for (const dup of duplicates) {
+    await db.markInbox(dup.id, 'duplicate');
+    await send(
+      TOKEN,
+      OWNER,
+      `Skipped a repeat of "${dup.raw_text}": only the first copy gets booked. Send it again if you meant both.`,
+    );
+  }
+
+  for (const [i, row] of pending.slice(0, RETRY_PER_TICK).entries()) {
     if (i) await sleep(PACE_MS);
     try {
+      // The SAME transcript the live path uses, read and written, because a replay without it
+      // loses money in both directions. A deferred message enters the extractor with the
+      // question it was answering missing, so "lend her 2k" arrives stripped of the account
+      // the message before it named; and the question this path asks back is invisible to the
+      // NEXT live message, so a one-word answer to it ("maribank") is parsed alone and reads
+      // as a balance query. Both were observed in one exchange: three attempts to lend 2,000,
+      // every one of them replayed and answered, and the row never written.
+      //
+      // A stale row entering the current transcript is the accepted cost. The retry runs
+      // within a tick or two of the failure, rows come back ORDER BY id so a burst replays in
+      // its own order, and no context at all is the worse of the two.
       const parsed = await extract(
         GROQ,
         accounts.map((a) => a.id),
         { text: row.raw_text },
-        { today: today(), owner: await db.getSetting('owner_name') },
+        { today: today(), history: history.turns, owner: await db.getSetting('owner_name') },
       );
       await db.markInbox(row.id, 'parsed', { model: parsed.model, raw: parsed.raw });
+      // After the parse, exactly as the live path does it: a message that could not be read
+      // is not something the next call should be reasoning from.
+      history.add('user', row.raw_text ?? '');
       for (const ev of parsed.events) {
         const r = await applyEvent(db, accounts, ev, { inboxId: row.id, today: today(), hadPhoto: false });
         await send(TOKEN, OWNER, `(retried) ${r.text}`, r.keyboard);
+        // Without the prefix. "(retried)" is for the reader, and the model reading its own
+        // question back with a marker on it is being told something that is not about money.
+        history.add('assistant', r.text);
       }
       await db.markInbox(row.id, 'applied');
     } catch (e) {

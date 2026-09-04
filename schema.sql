@@ -70,6 +70,7 @@ CREATE TABLE inbox (
   raw_response        TEXT,
   status              TEXT    NOT NULL DEFAULT 'received',
                               -- received | parsed | applied | blocked | deferred | failed
+                              -- | duplicate (a re-send the retry drain refused to book twice)
   error               TEXT,
   logged_at           TEXT    NOT NULL      -- UTC ISO8601
 );

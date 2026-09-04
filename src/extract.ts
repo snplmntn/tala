@@ -323,6 +323,7 @@ HARD RULES:
 - Non-peso amounts ("$20 for cursor"): return amount: null and put the original in note. The peso amount the card was actually charged is the only authoritative figure, and you do not know it.
 - NEVER invent an account name. Use only the given ids — the one exception is intent: open_account, which is how a new id comes into existence.
 - A refund or money back is intent: expense with a POSITIVE amount and the same category as the original.
+- LENDING someone money is an expense whose shared_amount is the WHOLE amount, with merchant = who borrowed it: "mom borrowed 2k maribank" and "lend her 2k from gcash" are one expense of 2000, shared_amount 2000, merchant "mom". The money really did leave the account and it is still owed to the user, which is what shared_amount means. Never return unknown for a loan and never ask what kind of thing it is.
 - Split multi-item messages into separate events, one per SEPARATE PURCHASE ("jeep 15, load 50, lunch 90" is three events). But a QUALIFIER about one purchase is NOT a second event: "600 dinner maribank, 400 not mine" is ONE expense of 600 with shared_amount 400, never two events.
 
 THE CONVERSATION SO FAR IS CONTEXT, NOT DECORATION:
