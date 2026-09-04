@@ -327,7 +327,9 @@ test('a natural-language anchor writes nothing until confirmed', async () => {
 
   assert.match(proposal.text, /Anchor Maya Savings at ₱98,000\.00/);
   assert.ok(proposal.keyboard, 'a proposal must offer a confirm button');
-  assert.equal(proposal.keyboard![0][0].callback_data, 'snap:maya:9800000');
+  // Cancel first, commit last — same hand position as every other confirm row.
+  assert.equal(proposal.keyboard![0][0].callback_data, 'nope');
+  assert.equal(proposal.keyboard![0].at(-1)!.callback_data, 'snap:maya:9800000');
 
   const [before] = await db.all<{ n: number }>('SELECT COUNT(*) AS n FROM snapshots');
   assert.equal(before.n, 0, 'proposing must not write');

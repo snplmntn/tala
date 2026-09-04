@@ -44,9 +44,11 @@ export async function proposeAnchor(
   return {
     text: `Anchor ${account.name} at ${peso(balance)} as of ${today}?${was}`,
     keyboard: [
+      // Cancel LEFT, commit right: every other row in the app puts the affirmative last
+      // (fix · void · confirm), and the thumb learns one position, not two.
       [
-        { text: '✓ anchor it', callback_data: `snap:${account.id}:${balance}` },
         { text: '✗ cancel', callback_data: 'nope' },
+        { text: '✓ anchor it', callback_data: `snap:${account.id}:${balance}` },
       ],
     ],
   };
