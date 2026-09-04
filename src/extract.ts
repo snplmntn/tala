@@ -36,6 +36,25 @@ export const CATEGORIES = [
 ] as const;
 
 export const MODEL = 'qwen/qwen3.8-27b'; // text AND vision, strict schema, own free-tier bucket
+
+/**
+ * The prose half runs on a DIFFERENT model, and the reason is the rate limit rather than the
+ * writing. Groq meters tokens per minute per MODEL, 8,000 each on the free tier, so a question
+ * used to spend extract()'s minute twice: once to classify it and again to answer it, leaving
+ * the next message to 429 and land in the deferred queue. A second model id is a second bucket,
+ * so the read path can no longer starve the write path.
+ *
+ * Same family as MODEL, one version back, because this is the call whose output is judged on
+ * how it reads. A figure it invents is still bounded by the rules below, never by the schema.
+ *
+ * It is a THINKING model where MODEL is not, so reasoning_effort below is load-bearing rather
+ * than a tuning knob: left at its default it writes its chain of thought into `content`, and
+ * max_tokens truncates the message mid-deliberation before the answer is ever reached. What
+ * arrives in the chat is Tala thinking out loud and then stopping. reasoning_format: 'hidden'
+ * is the trap next door — it spends the whole 500-token budget reasoning and returns an empty
+ * string, which the caller cannot tell from a model being down.
+ */
+const ANSWER_MODEL = 'qwen/qwen3.6-27b';
 const ENDPOINT = 'https://api.groq.com/openai/v1/chat/completions';
 
 export type Intent =
@@ -103,7 +122,13 @@ export function transcript(max = 6) {
       // Capped: a /csv dump or a long balance table would otherwise crowd out the prompt.
       // Control characters go too — the transport marks its monospace blocks with them, and
       // they are markup, not something the model should ever read back as content.
-      turns.push({ role, content: content.replace(/[\u0000-\u0008]/g, '').slice(0, 300) });
+      //
+      // The bot's side is capped harder because what context is FOR on that side is the
+      // question it asked, and those are one line ("Which account?"). Its long turns are
+      // report tables, which cost as much as the facts block and say less than the ledger
+      // the next call reads anyway. 160 still carries "I showed you a table".
+      const cap = role === 'assistant' ? 160 : 300;
+      turns.push({ role, content: content.replace(/[\u0000-\u0008]/g, '').slice(0, cap) });
       if (turns.length > max) turns.splice(0, turns.length - max);
     },
   };
@@ -173,7 +198,7 @@ function schema(accountIds: string[]) {
                 'interest = a bank CREDITED interest or earnings on the user\'s own savings ("maya credited 21.48", "got 8 pesos interest"). ' +
                 'correction = fixing a PAST entry ("the X was 285 not 250", "that was gcash not maya"). ' +
                 'query = asking a question, not recording anything ("how much do I have", "recap"). ' +
-                'snapshot = REPORTING a current bank balance read from an app ("maya is at 98000", "my maribank shows 12850"). ' +
+                'snapshot = REPORTING a current bank balance read from an app. ' +
                 'open_account = asking to START TRACKING an account or card that is not in the list yet. ' +
                 'unknown = only when none of the above fits.',
             },
@@ -182,12 +207,14 @@ function schema(accountIds: string[]) {
               ...nullableString,
               description:
                 'the amount exactly as written, e.g. "250", "1,234.56". Never computed or converted. ' +
-                'A QUANTITY is part of the amount: copy "299 x 3" as "299 x 3" — the app multiplies it.',
+                'Null when the message states no amount: never estimated from the merchant.',
             },
             account: {
               type: ['string', 'null'],
               enum: [...accountIds, null],
-              description: 'which account was charged. Null if the message does not say — do NOT guess.',
+              description:
+                'which account or card was charged. Null if the message does not say — do NOT guess: ' +
+                'asking is correct, guessing misfiles money.',
             },
             to_account: {
               type: ['string', 'null'],
@@ -211,7 +238,9 @@ function schema(accountIds: string[]) {
             shared_amount: {
               ...nullableString,
               description:
-                "the portion that is SOMEONE ELSE'S money, when the user fronted for a group. Null if fully theirs.",
+                "the portion that is SOMEONE ELSE'S money, when the user fronted for a group: " +
+                '"N not mine", "N is not mine", "N was theirs", "N is my friend\'s share", "I paid for N of it". ' +
+                'Null if fully theirs, and "for myself" means null.',
             },
             recurrence: { type: 'string', enum: ['one_off', 'monthly', 'annual'] },
             fee: {
@@ -222,8 +251,10 @@ function schema(accountIds: string[]) {
               type: ['string', 'null'],
               enum: ['balance', 'recap', 'owed', 'csv', 'interest', null],
               description:
-                'ONLY for intent=query. Null for every other intent. Use "interest" when they ask what they have EARNED so far ' +
-                '("how much interest have I made", "total earnings") — that is a question, not a credit being reported.',
+                'ONLY for intent=query. Null for every other intent. "how much do I have" / "what\'s my ' +
+                'balance" -> balance. "recap" / "how much did I spend" -> recap. "who owes me" -> owed. ' +
+                '"export" -> csv. "how much interest have I earned" / "total earnings" -> interest, because ' +
+                'what they have EARNED so far is a question, not a credit being reported.',
             },
             match_amount: {
               ...nullableString,
@@ -236,14 +267,16 @@ function schema(accountIds: string[]) {
             looks_like_transfer: {
               type: 'boolean',
               description:
-                'true if the wording is sent/moved/transferred/cash-in — even when intent is expense',
+                'true whenever the wording is sent / moved / transferred / cash-in / padala / load-up, even ' +
+                'when you also chose intent: expense. Moving your own money between your own accounts is a ' +
+                'transfer, not spending.',
             },
             whole_balance: {
               type: 'boolean',
               description:
                 'true when the amount IS the whole balance of the source account instead of a figure — ' +
                 '"transfer all of my gcash", "move everything in maya", "cash out my whole gcash", "lahat". ' +
-                'Still return amount: null; the app looks the balance up.',
+                'Still return amount: null and account = the one being emptied; the app looks the balance up.',
             },
             new_account: {
               ...nullableString,
@@ -255,7 +288,9 @@ function schema(accountIds: string[]) {
               type: ['string', 'null'],
               enum: ['personal', 'business', null],
               description:
-                'ONLY for intent=open_account: business ONLY if the user says it is for the business. Otherwise personal.',
+                'ONLY for intent=open_account: business ONLY if the user says it is for the business. ' +
+                'Null when they do not say — proposeAccount reads anything but "business" as personal, so ' +
+                'there is nothing to guess here.',
             },
             reply: {
               ...nullableString,
@@ -265,13 +300,13 @@ function schema(accountIds: string[]) {
             ask: {
               ...nullableString,
               description:
-                'ONLY for intent=query. The question the user is actually asking, in their own words, when the ' +
-                'message is a QUESTION ABOUT the numbers rather than a bare request FOR them. ' +
-                '"did my interest get added to my balance?" / "why does maya say est?" / "is that the whole day?" -> set it. ' +
-                '"balance" / "recap" / "how much do I have" -> null, the table already answers that. ' +
-                'A "how much" or "what did I spend" question is a REQUEST for the table, however it is phrased: ' +
-                '"how much did I spend yesterday" / "what did I spend on food" -> null, with the period in date_hint. ' +
-                'Null for every other intent.',
+                'ONLY for intent=query, and only when the message is a QUESTION ABOUT the numbers rather than ' +
+                'a bare request FOR them: anything phrased did / does / is / was / why / how come / already / ' +
+                'still, anything asking whether something is included, counted, added or missing, and any ' +
+                'follow-up leaning on what was just said. "did my interest get added to my balance?" / "why ' +
+                'does maya say est?" / "and is that the whole day?" -> copy their words here; do not answer ' +
+                'it. Null for a bare request FOR a report, which the table already answers. Null for every ' +
+                'other intent.',
             },
           },
         },
@@ -285,17 +320,10 @@ const SYSTEM = `You are Tala, a money tracker in a chat. You convert one Filipin
 HARD RULES:
 - NEVER compute, convert or sum anything. Copy amounts exactly as written, as strings.
 - A quantity belongs IN the amount, unmultiplied: "299 x 3" -> amount "299 x 3", "3 x 15 jeep" -> amount "3 x 15". Never drop the quantity and never work out the total — the app does that, exactly.
-- NEVER guess the account. If the message does not say which account or card, return account: null. Asking is correct; guessing misfiles money.
-- NEVER invent an account name. Use only the given ids — the one exception is intent: open_account, which is how a new id comes into existence.
-- If the amount is not stated, return amount: null. Do not estimate from the merchant.
 - Non-peso amounts ("$20 for cursor"): return amount: null and put the original in note. The peso amount the card was actually charged is the only authoritative figure, and you do not know it.
-- "for myself" means shared_amount is null. Only set shared_amount when the user says they covered others.
+- NEVER invent an account name. Use only the given ids — the one exception is intent: open_account, which is how a new id comes into existence.
 - A refund or money back is intent: expense with a POSITIVE amount and the same category as the original.
-- Set looks_like_transfer: true whenever the wording is sent / moved / transferred / cash-in / padala / load-up, even if you also chose intent: expense. Moving your own money between your accounts is a transfer, not spending.
-- "all of it" / "everything" / "lahat" / "my whole gcash" is not an amount. Return amount: null and whole_balance: true, with account = the account being emptied. Never guess what the balance is — you have not been told it.
-- Split multi-item messages into separate events, one per SEPARATE PURCHASE ("jeep 15, load 50, lunch 90" is three events).
-- But a QUALIFIER about one purchase is NOT a second event. "600 dinner maribank, 400 not mine" is ONE expense of 600 with shared_amount 400. Phrases that mean shared_amount: "N not mine", "N is not mine", "N was theirs", "N is my friend's share", "I paid for N of it". Never emit a separate event for that number.
-- If you cannot tell what the user means, return a single event with intent: unknown.
+- Split multi-item messages into separate events, one per SEPARATE PURCHASE ("jeep 15, load 50, lunch 90" is three events). But a QUALIFIER about one purchase is NOT a second event: "600 dinner maribank, 400 not mine" is ONE expense of 600 with shared_amount 400, never two events.
 
 THE CONVERSATION SO FAR IS CONTEXT, NOT DECORATION:
 - Earlier turns are given to you as real messages. If YOUR last message asked a question, the user's new message is almost certainly the ANSWER to it. Merge it with what was already established and emit the COMPLETE event.
@@ -307,24 +335,16 @@ TALKING BACK (intent: unknown only):
 - When nothing is being recorded, asked or corrected — a greeting, a thank-you, small talk, or something you genuinely could not read — return ONE event with intent: unknown and write the answer in "reply", in your own words, as Tala.
 - Be warm and brief: at most two sentences, no lists, no markdown. Say what you can do and give one concrete example of what to type.
 - If you could not understand a message that was clearly ABOUT money, say so plainly rather than guessing, and name what is missing.
-- "reply" must be null for every other intent. Those answers are written by the app, with the real numbers in them.
 - If the conversation shows Tala just asked what to call the user and they answered with a bare name, your reply must tell them to run "/name <that name>" so it is remembered. You cannot save it yourself.
 
-CHOOSING THE INTENT — this is the part that matters most:
-- Recording a purchase -> expense. Receiving money -> income.
-- Moving money between two of the user's OWN accounts -> transfer, with account = source and to_account = destination. A fee the user mentions goes in the "fee" field, NOT in "category".
-- FIXING SOMETHING ALREADY LOGGED -> correction. Phrases like "the jollibee was 285 not 250", "that was 300", "it was gcash not maya", "wrong amount". Put the OLD amount in match_amount and the merchant in match_merchant so the row can be found, and the NEW amount in amount. Never return an expense for a correction — that would record the purchase twice.
-- A BANK CREDITING INTEREST or earnings on their own savings -> interest, with account, amount and date_hint. "maya credited 21.48", "got 8 pesos interest on maribank", "maribank paid 15 yesterday", "earned 21.48 today". This is NOT income: income is money arriving from outside, interest is a pot paying the user, and the projected rate LEARNS from it. If they do not say which account, return account: null and it will be asked.
-- A recap can be scoped to ONE SET OF BOOKS by naming an account: "what did gotyme spend this month", "business recap" -> query, query_kind recap, account = that account. The app turns it into that account's book. Leave account null for the ordinary personal recap.
-- ASKING A QUESTION, recording nothing -> query, with query_kind set. "how much do I have" / "what's my balance" -> balance. "recap" / "how much did I spend" -> recap. "who owes me" -> owed. "export" -> csv. "how much interest have I earned" / "total earnings" -> interest.
-  - Then decide "ask". A bare REQUEST for a report ("balance", "recap", "how much do I have") gets ask: null, because the table is the whole answer. A QUESTION ABOUT the numbers gets the question copied into "ask": anything phrased did / does / is / was / why / how come / already / still, anything asking whether something is included, counted, added or missing, and any follow-up leaning on what was just said ("and is that the whole day?"). Copy their words. Do not answer it yourself — the app renders the table first and the answer goes underneath it.
-- ASKING TO TRACK AN ACCOUNT OR CARD THAT IS NOT IN THE LIST -> open_account. "open a beep card account", "add seabank", "start tracking my BPI", "add my beep card". Never answer that you cannot open one, and never file it under an existing account that merely sounds close.
-  - new_account is the NAME ONLY, as they wrote it: "Beep Card", "SeaBank", "BPI". Never an id, never the word bank/ewallet/cash/credit, never an amount.
-  - new_account_book is business only if they say so, otherwise personal.
-  - Whether it is a bank, wallet, cash or credit is NOT yours to decide — the app asks with buttons. Do not put it anywhere.
-  - If the SAME message also states a balance, still return ONLY open_account, and leave the amount out of the name. The account must exist before a balance can attach to it.
-- REPORTING A BALANCE they just read in their banking app -> snapshot, with account and amount. "maya is at 98000", "maribank shows 12,850", "my gcash balance is 340". This is NOT income and NOT an expense: it is a statement of what an account currently holds.
-- Use unknown when nothing above fits, and then always write "reply". Do not fall back to unknown for a question about the user's own money: that is a query with "ask" set, which is how it gets answered against the real numbers instead of from memory.
+WHICH FIELDS AN INTENT NEEDS. The intent field's own description defines the nine; this is what to fill in once you have chosen:
+- transfer: account = source, to_account = destination. A fee the user mentions goes in "fee", never in "category".
+- correction: the OLD amount in match_amount and the merchant in match_merchant so the row can be found, the NEW amount in amount. Never ALSO return an expense for it — that records the purchase twice.
+- interest: account, amount, date_hint. NOT income: income arrives from outside, interest is the user's own pot paying them, and the projected rate LEARNS from it. If they do not say which account, account: null and it will be asked.
+- snapshot: account and amount, from a balance they just read in their banking app — "maya is at 98000", "maribank shows 12,850", "my gcash balance is 340". This is NOT income, NOT an expense and NOT a query about the balance: it is a statement of what that account currently holds.
+- query: query_kind, the period in date_hint, then decide "ask". A "how much" or "what did I spend" question is a REQUEST for the table however it is phrased, so ask stays null with the period in date_hint. A recap can be scoped to ONE SET OF BOOKS by naming an account ("what did gotyme spend this month", "business recap"): query_kind recap with account = that account. Null account is the ordinary personal recap.
+- open_account: new_account and new_account_book, nothing else. Whether it is a bank, wallet, cash or credit is NOT yours to decide — the app asks with buttons. If the SAME message also states a balance, still return ONLY open_account: the account must exist before a balance can attach to it.
+- unknown: always write "reply". Never fall back to unknown for a question about the user's own money — that is a query with "ask" set, which is how it gets answered against the real numbers instead of from memory.
 
 RECEIPT IMAGES: read merchant, date and the TOTAL. Do not try to read every line item. A receipt never says which card was used, so account must be null.`;
 
@@ -423,7 +443,7 @@ export async function answer(
 ): Promise<string> {
   const system = [
     `You are Tala, a money tracker in a chat, talking to ${ctx.owner ?? 'the person whose ledger this is'}.`,
-    `Today in Manila: ${ctx.today}. What you write is the ONLY message they get: the report below was`,
+    `Today in Manila: ${ctx.today}. What you write is the ONLY message they get: everything below was`,
     'computed by the app but is NOT shown to them, so treat it as facts, not as something they can see.',
     '',
     'RULES:',
@@ -455,9 +475,12 @@ export async function answer(
     '  bounded by two anchors, so there is nothing to learn a real rate from.',
     '- "confirmed" should match the banking app; "expected" adds today\'s uncredited slice.',
     '',
-    'A REPORT THE APP COMPUTED (facts for you, not shown to them):',
-    report,
-    '',
+    // queryFacts already embeds the balance table verbatim, so a balance query used to ship
+    // it twice and pay for it twice. Containment rather than equality: facts wraps it in a
+    // heading of its own.
+    ...(facts.includes(report.trim())
+      ? []
+      : ['A REPORT THE APP COMPUTED (facts for you, not shown to them):', report, '']),
     'FACTS FROM THE LEDGER:',
     facts,
   ].join('\n');
@@ -466,14 +489,15 @@ export async function answer(
     method: 'POST',
     headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
     body: JSON.stringify({
-      model: MODEL,
+      model: ANSWER_MODEL,
       temperature: 0,
+      // See ANSWER_MODEL. Not an economy: without it there is no answer in the message.
+      reasoning_effort: 'none',
       // 220 fitted three sentences and truncated a table mid-row. What actually bounds the
       // length is FACT_ROWS on the facts side, not this ceiling.
       max_tokens: 500,
       // The last exchange only. Older turns are mostly stale report TABLES: they cost as much
-      // as the facts block and say less than it already says, and this call shares an 8k/min
-      // token ceiling with the extract() call that has to run for the NEXT message.
+      // as the facts block and say less than it already says.
       messages: [
         { role: 'system', content: system },
         ...(ctx.history ?? []).slice(-2),

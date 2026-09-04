@@ -40,6 +40,7 @@ import {
   type Event,
 } from '../src/ledger.ts';
 import { resolveDate } from '../src/extract.ts';
+import { asCommand } from '../src/handlers.ts';
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -734,4 +735,20 @@ test('resolveDate reads every format the schema promises the model, and refuses 
   assert.equal(on('2026-02-31'), null);
   assert.equal(on('the other day'), null);
   assert.equal(on('sometime last week'), null);
+});
+
+/**
+ * The bare-word path skips the extractor entirely, so a phrase leaking into it would answer
+ * a question nobody asked: "how much did I spend yesterday" needs the period the model reads
+ * out of it, and /recap alone answers for today.
+ */
+test('a bare report word is a command, a sentence containing one is not', () => {
+  assert.equal(asCommand('balance'), '/balance');
+  assert.equal(asCommand('  Recap '), '/recap');
+  assert.equal(asCommand('export'), '/csv');
+  assert.equal(asCommand('fee 10'), '/fee 10');
+  assert.equal(asCommand('/recap month'), '/recap month');
+  assert.equal(asCommand('how much did I spend yesterday'), null);
+  assert.equal(asCommand('business recap'), null);
+  assert.equal(asCommand('250 jollibee maribank'), null);
 });

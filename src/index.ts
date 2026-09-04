@@ -16,6 +16,7 @@ import { addDays, dayDiff, daysBetween, manilaDate, manilaHour, manilaStartOfDay
 import {
   COMMANDS,
   applyEvent,
+  asCommand,
   balances,
   callback,
   dropFired,
@@ -164,7 +165,7 @@ async function handle(u: Update): Promise<boolean> {
   // Deterministic commands never reach the LLM. The anchor in particular is the one number
   // the design trusts unconditionally, so it does not go through a probabilistic parser.
   // One dispatcher, shared with the local REPL, so the two can never drift.
-  if (!hasPhoto && text.startsWith('/')) {
+  if (!hasPhoto && asCommand(text)) {
     const reply = await runCommand(db, await db.accounts(), text, today());
     if (reply) {
       if (reply.document) {
@@ -330,21 +331,61 @@ async function timedReminders(): Promise<void> {
 }
 
 /**
+ * What one extract() call actually costs, and the two pacing constants that follow from it.
+ *
+ * MEASURED against Groq's own token counter, not estimated: 2,692 of prompt (SYSTEM plus the
+ * strict schema, which is half of it) and ~150 of completion. It is here as a constant
+ * because both pacing numbers below used to be independent guesses at it — "~1.2k" here and
+ * "roughly 1.8k" at PACE_MS, both of them the SYSTEM string alone, counting neither the schema
+ * nor the transcript. Each therefore let through about twice what fits, which is why a drain
+ * 429s partway and re-defers instead of draining.
+ *
+ * The free tier meters tokens per MINUTE per MODEL, and it refills continuously rather than in
+ * one lump each minute: spend 14 tokens and the reset header says 105ms, which is exactly
+ * 14 / (8000/60). So the sustainable gap between two calls is what it takes to refill one,
+ * and the pacing is that division instead of a round number that felt safe.
+ */
+const CALL_TOKENS = 2_850;
+const TPM = 8_000;
+
+/**
+ * How long to wait between two messages that both need the extractor: long enough for the
+ * bucket to refill one call. See CALL_TOKENS for where the number comes from.
+ *
+ * This only ever fires while draining a BACKLOG — everything Telegram held while the service
+ * was asleep, redeploying or unreachable — because a single message has nothing after it to
+ * pace against.
+ *
+ * Without it the drain fires every queued message at once and 429s partway through. Nothing is
+ * lost, but the ORDER is: a reply that answers the bot's own question ("maribank", right after
+ * being asked which account) gets parsed with its question missing from the transcript, and
+ * comes out as something else entirely. That is the cost being paid for here, and it is why
+ * the gap is derived rather than picked — 14s was under it, so the drain it exists to protect
+ * was still bouncing off the ceiling around the fourth message.
+ */
+const PACE_MS = Math.ceil(CALL_TOKENS / (TPM / 60)) * 1000;
+
+/**
  * Retry whatever a provider outage deferred, so nothing sits in the inbox forever.
  *
- * Paced, and this is not theoretical: Groq's free tier caps at 8,000 tokens per MINUTE, and
- * this prompt is ~1.2k tokens, so roughly six calls a minute. A human typing never notices;
- * a catch-up loop firing twenty in a row 429s partway and re-defers the rest. So it takes a
- * few per tick and lets the scheduler come back — the backlog drains over minutes instead of
- * bouncing off the ceiling every time.
+ * Paced, and this is not theoretical. A human typing never notices the ceiling; a catch-up
+ * loop firing twenty in a row 429s partway and re-defers the rest. So it takes a couple per
+ * tick and lets the scheduler come back — the backlog drains over minutes instead of bouncing
+ * off the ceiling every time.
+ *
+ * The tick is 60s, so this is calls per minute, and the rows are spaced by PACE_MS rather than
+ * fired back to back. That spacing is what leaves room for a message the owner types mid-drain:
+ * an unused slot would leave the same room, but only if the drain never bursts, and two calls
+ * in the same second is a burst whatever the per-minute total says.
  */
-const RETRY_PER_TICK = 3;
+const RETRY_PER_TICK = Math.floor(TPM / CALL_TOKENS);
 
 async function retryDeferred(): Promise<void> {
   const rows = (await db.deferred()).slice(0, RETRY_PER_TICK);
   if (!rows.length) return;
   const accounts = await db.accounts();
-  for (const row of rows) {
+  for (const [i, row] of rows.entries()) {
+    if (i) await sleep(PACE_MS);
     try {
       const parsed = await extract(
         GROQ,
@@ -413,24 +454,6 @@ function scheduler(): void {
 // ─────────────────────────────────────────────────────────────────────────────
 // The loop.
 // ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * How long to wait between two messages that both need the extractor.
- *
- * This only ever fires while draining a BACKLOG — everything Telegram held while the service
- * was asleep, redeploying or unreachable — because a single message has nothing after it to
- * pace against.
- *
- * Without it the drain fires every queued message at once, and Groq's free tier caps at 8,000
- * tokens per MINUTE against a prompt of roughly 1.8k, so about the fifth call 429s and the
- * rest defer. Nothing is lost, but the ORDER is: a reply that answers the bot's own question
- * ("maribank", right after being asked which account) gets parsed with its question missing
- * from the transcript, and comes out as something else entirely.
- *
- * retryDeferred already paces for exactly this reason — see RETRY_PER_TICK. The cold-start
- * drain is the larger burst and simply never got the same treatment.
- */
-const PACE_MS = 14_000;
 
 async function poll(): Promise<never> {
   // The offset comes from the ledger itself: max(telegram_update_id) + 1. No extra table,

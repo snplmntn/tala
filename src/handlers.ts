@@ -331,6 +331,38 @@ export async function firstRun(db: Db, accounts: Account[]): Promise<string | nu
 }
 
 /**
+ * The slash form of a line, or null when it is not a command at all.
+ *
+ * Two slashless spellings reach it. "fee 10" because the transfer reply asks for it BY NAME
+ * and a message the app dictated must never reach the extractor: the transfer is still in the
+ * transcript, and the model emits the whole thing a second time. And a bare report word,
+ * because an extraction call is the most expensive way to learn that "balance" meant
+ * /balance — roughly 2,700 tokens of an 8,000-per-minute ceiling, spent to be told a word.
+ *
+ * WHOLE MESSAGE or nothing. "how much did I spend yesterday" carries a period and an `ask`
+ * decision only the extractor can make, and "business recap" names a set of books, so both
+ * still go to the model. Here rather than in the bot's dispatcher so the REPL cannot answer
+ * differently, and exported so the bot can skip the LLM without asking twice.
+ */
+const BARE: Record<string, string> = {
+  balance: '/balance',
+  balances: '/balance',
+  recap: '/recap',
+  owed: '/owed',
+  csv: '/csv',
+  export: '/csv',
+  rate: '/rates',
+  rates: '/rates',
+  undo: '/undo',
+  help: '/help',
+};
+
+export const asCommand = (line: string): string | null => {
+  const t = line.trim();
+  return BARE[t.toLowerCase()] ?? (/^fee\b/i.test(t) ? `/${t}` : t.startsWith('/') ? t : null);
+};
+
+/**
  * Dispatch a slash command. Returns null when it is not a command at all, so the caller
  * falls through to the LLM. Deterministic: nothing here goes near the extractor.
  */
@@ -340,12 +372,8 @@ export async function runCommand(
   line: string,
   today: string,
 ): Promise<Reply | null> {
-  // The transfer reply asks for "fee 10" BY NAME and without a slash, so answer to it
-  // without one. A message the app dictated must never reach the extractor: the transfer is
-  // still in its transcript, and it emits the whole thing a second time. Here rather than in
-  // the bot's dispatcher so the REPL cannot answer differently.
-  const typed = /^fee\b/i.test(line) ? `/${line}` : line;
-  if (!typed.startsWith('/')) return null;
+  const typed = asCommand(line);
+  if (!typed) return null;
   const [raw, ...rest] = typed.split(/\s+/);
   const cmd = raw.slice(1).toLowerCase();
   const arg = rest.join(' ');
