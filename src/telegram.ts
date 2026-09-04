@@ -57,6 +57,12 @@ export interface Message {
   caption?: string;
   photo?: { file_id: string; file_size?: number; width: number; height: number }[];
   document?: { file_id: string };
+  /**
+   * The message this one replies to, when there is one. Only ever read as CONTEXT: it is
+   * the one way to point at something older than the six turns the transcript keeps, and
+   * `from.is_bot` is what decides whether it re-enters as the bot's turn or as yours.
+   */
+  reply_to_message?: { text?: string; caption?: string; from?: { is_bot?: boolean } };
 }
 
 /**

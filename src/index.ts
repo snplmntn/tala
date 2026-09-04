@@ -191,6 +191,19 @@ async function handle(u: Update): Promise<boolean> {
     return false;
   }
 
+  // A reply is the only way to point at something older than the six turns the transcript
+  // keeps. It enters as its OWN turn rather than glued onto the text being parsed: quoting
+  // "jeep 15" and saying "make it 20" would otherwise read as two events, and a phantom row
+  // is worse than no context at all. Roles carry it — the bot's message re-enters as the
+  // bot's, so the model still knows which question was its own.
+  const quoted = m.reply_to_message;
+  const quotedText = (quoted?.text ?? quoted?.caption ?? '').trim();
+  // Replying to the message directly above you is the common case, and it is already the
+  // last turn: adding it again would spend two of six slots on one line.
+  if (quotedText && history.turns.at(-1)?.content !== quotedText.slice(0, 300)) {
+    history.add(quoted?.from?.is_bot ? 'assistant' : 'user', quotedText);
+  }
+
   const accounts = await db.accounts();
   let parsed;
   try {
