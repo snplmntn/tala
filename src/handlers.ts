@@ -27,7 +27,7 @@ import { correct, feeCmd, money, transfer, undo, voidWithSiblings } from './entr
 import { anchorAccount, proposeAnchor, snapshot } from './anchors.ts';
 import { balances, csv, interest, queryFacts, rates, recap, remaining, remainingFor } from './reports.ts';
 import { acct, noAccount, nowIso, type CallbackReply, type Reply } from './reply.ts';
-import { mono } from './telegram.ts';
+import { mono, plain } from './telegram.ts';
 
 export { anchorAccount, proposeAnchor, snapshot } from './anchors.ts';
 export { balances, csv, interest, rates, recap } from './reports.ts';
@@ -94,21 +94,25 @@ export async function applyEvent(
 }
 
 /**
- * The report, plus the answer to the question the report does not answer.
+ * The answer to the question, INSTEAD of the report that does not answer it.
  *
  * A table says what a number IS. "did my interest get added", "why does this still say est",
- * "is that the whole day" are questions about how it got there, and every one of them used to
- * be routed to the nearest report and answered with a table the user had just seen. That is
- * the difference between a ledger you read and a ledger you can talk to.
+ * "what are all my gotyme expenses" are questions about how it got there, and every one of
+ * them used to be routed to the nearest report. That is the difference between a ledger you
+ * read and a ledger you can talk to.
  *
- * BELOW the report, never instead of it: the code-computed figures stay first and stay
- * authoritative, so prose that paraphrases one badly is contradicted in the same message.
+ * It used to append the answer BELOW the report, so the code-computed figures stayed on
+ * screen as a cross-check. That traded one problem for a louder one: query_kind picks the
+ * report from the wording, so "expenses for gotyme" landed on today's personal recap and
+ * shipped an empty table above the real answer. A report nobody asked for is not a safety
+ * net, it is noise with a total in it. The figure rules in answer() are the guard now, and
+ * the whole path is read-only: nothing here can write a row.
  *
- * Failure is silent by design. A model that is rate-limited, slow or down must never cost you
- * the answer you actually asked for, and the report is already complete without this.
+ * Failure is silent by design. A model that is rate-limited, slow or down falls back to the
+ * report, which is why it is still computed before we get here.
  */
 /**
- * True when the report IS the whole answer, so nothing gets appended to it.
+ * True when the report IS the whole answer, so no model call is made and it is sent as is.
  *
  * "how much did i spend yday" is a bare REQUEST wearing a question mark, and the extractor's
  * did/was/is heuristic reads it as a follow-up — so a dated, totalled recap came back with a
@@ -120,6 +124,15 @@ export const tableAnswers = (ask: string): boolean =>
   /^\s*(how much|how many|what|magkano)\b/i.test(ask) &&
   !/\b(why|how come|still|already|includ\w*|counted|added|missing|est|mean|means)\b/i.test(ask);
 
+/**
+ * The model marks a table with ``` fences, because it cannot type mono()'s control
+ * characters and must never be able to: they become <pre> tags in the transport, so a
+ * merchant name that could forge one would be markup. Anything already carrying a marker is
+ * stripped before the fences are honoured, so the only <pre> in the message is one we opened.
+ */
+export const fenced = (text: string): string =>
+  plain(text).replace(/```[a-z]*\n?([\s\S]*?)```/g, (_, block: string) => mono(block.replace(/\n+$/, '')));
+
 async function withAnswer(
   db: Db,
   accounts: Account[],
@@ -127,8 +140,8 @@ async function withAnswer(
   report: Reply,
   ctx: { today: string; groqKey?: string; history?: Turn[] },
 ): Promise<Reply> {
-  // A bare "balance" or "recap" gets nothing appended: the table IS the answer, and prose
-  // after it would be noise on the path that is already working.
+  // A bare "balance" or "recap" keeps its report: the table IS the answer there, and asking
+  // a model to restate it would be slower and less exact than the code that just built it.
   if (!e.ask?.trim() || tableAnswers(e.ask) || !ctx.groqKey || report.document) return report;
   try {
     const prose = await answer(ctx.groqKey, e.ask, report.text, await queryFacts(db, accounts, ctx.today), {
@@ -136,7 +149,9 @@ async function withAnswer(
       history: ctx.history,
       owner: await db.getSetting('owner_name'),
     });
-    return prose ? { ...report, text: `${report.text}\n\n${prose}` } : report;
+    // The answer replaces the report rather than following it. An empty answer is not one,
+    // so that case falls back rather than sending nothing.
+    return prose ? { text: fenced(prose) } : report;
   } catch {
     return report;
   }

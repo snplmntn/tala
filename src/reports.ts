@@ -96,6 +96,13 @@ export async function queryFacts(db: Db, accounts: Account[], today: string): Pr
     );
     // Only what is NOT in the anchor. Rows dated on or before it are inside that reading
     // already, and listing them is how you get told the same peso twice.
+    // Said out loud, because the answer built from these rows can now be a table that claims
+    // to be a list. A silently truncated list is a wrong answer wearing the shape of a
+    // complete one; "and 7 older" is a caveat the model can pass on.
+    if (rows.length > FACT_ROWS)
+      out.push(
+        `  since the anchor: ${rows.length - FACT_ROWS} older rows not listed here, /csv has them all.`,
+      );
     for (const r of rows.slice(-FACT_ROWS)) {
       const bits = [r.occurred_at, r.type, peso(r.amount_centavos), r.merchant, r.category, r.note];
       out.push(`  since the anchor: ${bits.filter(Boolean).join(' · ')}`);

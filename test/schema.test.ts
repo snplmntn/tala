@@ -26,6 +26,7 @@ import {
   dropFired,
   dueReminders,
   dueTimed,
+  fenced,
   runCommand,
   tableAnswers,
 } from '../src/handlers.ts';
@@ -779,6 +780,17 @@ test('a question the report already answers gets no prose under it', () => {
   assert.ok(!tableAnswers('what does est mean'));
 });
 
+test('a fenced answer becomes a monospace block, and only a fenced one', () => {
+  // The answer to "what are all my gotyme expenses" is rows, not a paragraph, so the model
+  // fences a table and this is what turns it into a <pre> the columns line up inside.
+  const out = fenced('GoTyme, since the anchor:\n```\ndinner   897.00\ndinner   299.00\n```');
+  assert.match(out, /\u0001dinner {3}897\.00\ndinner {3}299\.00\u0002$/);
+  // A model that types the marker itself must not be able to open a block: only fences do.
+  assert.equal(fenced('\u0001not a table\u0002'), 'not a table');
+  // Prose comes back untouched, so an explanation never gains a stray block.
+  assert.equal(fenced('Yes, the 21.48 is already inside it.'), 'Yes, the 21.48 is already inside it.');
+});
+
 test('reminder text cannot smuggle a monospace marker into the daily line', async () => {
   // telegram.ts escapes every outgoing string, but it marks its monospace blocks with
   // control characters - those are markup, and user text must not be able to carry them.
@@ -928,11 +940,12 @@ test('an empty day is simply empty', async () => {
   assert.match(quiet, /spent\s+₱0\.00/);
 });
 
-test('a question about the numbers gets the table AND an answer, and never loses the table', async () => {
+test('a question gets the answer INSTEAD of the report, and never loses the reply', async () => {
   // The gap this closes: every spoken question was routed to the nearest report, so asking
   // "did my interest get added?" printed the same balance table you were already looking at.
-  // The table is still the authoritative half and still goes first — the prose is appended
-  // under it, so a model that paraphrases a figure badly is contradicted in the same message.
+  // Appending the answer under that table was the first fix and it was half of one: the
+  // report is picked from the wording, so "what are all my gotyme expenses" shipped today's
+  // empty personal recap above the real answer. The answer replaces it now.
   const db = await fresh();
   const accounts = await db.accounts();
   await anchorAccount(
@@ -959,8 +972,8 @@ test('a question about the numbers gets the table AND an answer, and never loses
     const q = { intent: 'query' as const, query_kind: 'balance' as const };
 
     const asked = await applyEvent(db, accounts, spokenEvent({ ...q, ask: 'is my interest in there?' }), ctx);
-    assert.match(asked.text, /Maya Savings/, 'the report must survive');
-    assert.match(asked.text, /Yes, it is already in there\./, 'and carry the answer under it');
+    assert.equal(asked.text, 'Yes, it is already in there.', 'the answer is the whole message');
+    assert.doesNotMatch(asked.text, /Maya Savings/, 'no report nobody asked for');
     assert.equal(calls, 1);
 
     // A bare request for a report spends nothing and appends nothing: the table IS the answer,

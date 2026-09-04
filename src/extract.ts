@@ -389,10 +389,15 @@ export async function extract(
 /**
  * Answer a question about numbers that CODE has already computed.
  *
- * The report is rendered first and sent whatever happens here — this only ever appends a
- * paragraph beneath it. That ordering is the whole safety argument: the authoritative figures
- * are already on screen, so a model that paraphrases one badly is contradicted in the same
- * message rather than believed.
+ * What comes back IS the message: the report the app rendered is context here, not something
+ * the person sees, because the report picked from the wording is regularly not the one the
+ * question is about. So the guard is on the FIGURES rather than on the layout — every number
+ * has to be one printed in the report or the facts block. The path stays read-only: nothing
+ * said here becomes a row.
+ *
+ * It may answer with a TABLE. A question like "what are all my gotyme expenses" wants rows,
+ * and a paragraph describing rows is the worst of both — it reads longer and says less. The
+ * fences it marks the table with are turned into a monospace block by the caller.
  *
  * No json_schema and no strict mode, unlike extract(). There is no shape to constrain: the
  * output is prose, and the only thing that could go wrong with it is being wrong, which a
@@ -414,7 +419,8 @@ export async function answer(
 ): Promise<string> {
   const system = [
     `You are Tala, a money tracker in a chat, talking to ${ctx.owner ?? 'the person whose ledger this is'}.`,
-    `Today in Manila: ${ctx.today}. The app has ALREADY sent them the report below; you write the answer under it.`,
+    `Today in Manila: ${ctx.today}. What you write is the ONLY message they get: the report below was`,
+    'computed by the app but is NOT shown to them, so treat it as facts, not as something they can see.',
     '',
     'RULES:',
     '- Lead with the answer. Start with Yes or No ONLY for an actual yes/no question: a "why" or',
@@ -427,8 +433,13 @@ export async function answer(
     '  in from memory.',
     '- The report names the period in its own first line, so never say you cannot tell which',
     '  days it covers, and never doubt a figure printed in it.',
-    '- Do not re-list the table. Say the one thing it does not say. Two or three sentences, no',
-    '  markdown, no bullets. If the ledger genuinely cannot tell, say so and name what would settle it.',
+    '- FORMAT. If the answer is a set of rows or figures (a list of expenses, what an account holds,',
+    '  what moved), print a table and nothing else: open ``` on its own line, one row per line with',
+    '  the amount right-aligned in a column, close ```. Under 40 characters wide, it is read on a',
+    '  phone. Put a total row ONLY if you can add it from figures you were given.',
+    '- If the answer is an EXPLANATION (why, how come, whether something is counted), write two or',
+    '  three sentences and no table. Never both. No bullets, no bold, no headings.',
+    '- If the ledger genuinely cannot tell, say so and name what would settle it.',
     '',
     'HOW A BALANCE IS BUILT, so you can explain it:',
     '- An anchor is a real balance read off the banking app on a day; everything after counts forward',
@@ -440,7 +451,7 @@ export async function answer(
     '  bounded by two anchors, so there is nothing to learn a real rate from.',
     '- "confirmed" should match the banking app; "expected" adds today\'s uncredited slice.',
     '',
-    'THE REPORT THEY CAN SEE:',
+    'A REPORT THE APP COMPUTED (facts for you, not shown to them):',
     report,
     '',
     'FACTS FROM THE LEDGER:',
@@ -453,7 +464,9 @@ export async function answer(
     body: JSON.stringify({
       model: MODEL,
       temperature: 0,
-      max_tokens: 220,
+      // 220 fitted three sentences and truncated a table mid-row. What actually bounds the
+      // length is FACT_ROWS on the facts side, not this ceiling.
+      max_tokens: 500,
       // The last exchange only. Older turns are mostly stale report TABLES: they cost as much
       // as the facts block and say less than it already says, and this call shares an 8k/min
       // token ceiling with the extract() call that has to run for the NEXT message.
