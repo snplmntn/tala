@@ -683,10 +683,19 @@ export function dedupeBacklog<T extends { raw_text: string | null }>(
   return { pending, duplicates };
 }
 
+/**
+ * The rows behind `unsettled`, so a list of who owes you and the total under it can never
+ * disagree. One predicate, two readers: /owed prints these, every report sums them.
+ *
+ * `effective` first, so a corrected loan counts once at its corrected share and a voided one
+ * does not count at all.
+ */
+export function owedRows(rows: Event[]): Event[] {
+  return effective(rows).filter((r) => (r.shared_amount_centavos ?? 0) > 0 && !r.settled_at);
+}
+
 export function unsettled(rows: Event[]): number {
-  return effective(rows)
-    .filter((r) => (r.shared_amount_centavos ?? 0) > 0 && !r.settled_at)
-    .reduce((t, r) => t + (r.shared_amount_centavos ?? 0), 0);
+  return owedRows(rows).reduce((t, r) => t + (r.shared_amount_centavos ?? 0), 0);
 }
 
 /**

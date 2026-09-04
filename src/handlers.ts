@@ -25,7 +25,18 @@ import {
 } from './ledger.ts';
 import { correct, feeCmd, money, transfer, undo, voidWithSiblings } from './entries.ts';
 import { anchorAccount, proposeAnchor, snapshot } from './anchors.ts';
-import { balances, csv, interest, queryFacts, rates, recap, remaining, remainingFor } from './reports.ts';
+import {
+  balances,
+  csv,
+  interest,
+  owed,
+  owedReply,
+  queryFacts,
+  rates,
+  recap,
+  remaining,
+  remainingFor,
+} from './reports.ts';
 import { acct, noAccount, nowIso, type CallbackReply, type Reply } from './reply.ts';
 import { mono, plain } from './telegram.ts';
 
@@ -146,7 +157,12 @@ async function withAnswer(
 ): Promise<Reply> {
   // A bare "balance" or "recap" keeps its report: the table IS the answer there, and asking
   // a model to restate it would be slower and less exact than the code that just built it.
-  if (!e.ask?.trim() || tableAnswers(e.ask) || !ctx.groqKey || report.document) return report;
+  //
+  // A report carrying a KEYBOARD keeps it too, for the same reason the CSV does: /owed answers
+  // with a settle tap per loan, and prose cannot be tapped. Swapping an actionable report for
+  // a paragraph about it would take the one thing that closes a debt off the screen.
+  if (!e.ask?.trim() || tableAnswers(e.ask) || !ctx.groqKey || report.document || report.keyboard)
+    return report;
   try {
     const prose = await answer(ctx.groqKey, e.ask, report.text, await queryFacts(db, accounts, ctx.today), {
       today: ctx.today,
@@ -192,6 +208,37 @@ export async function callback(db: Db, data: string, today: string): Promise<Cal
     const extra = siblings.length > 1 ? ` (+${siblings.length - 1} paired)` : '';
     const left = await remainingFor(db, await db.accounts(), siblings, today);
     return { text: `🗑 voided${extra}${left ? `, ${left}` : ''}` };
+  }
+
+  if (kind === 'settled') {
+    // Re-read, like every other tap: an inline keyboard from three weeks ago is still live,
+    // and the loan it points at may have been corrected, voided or already settled since.
+    const row = await db.one<Event>('SELECT * FROM events WHERE id = ?', [Number(a)]);
+    if (!row) return { text: 'That row is gone.' };
+    if (row.settled_at) return { text: 'Already settled.' };
+    if (!(row.shared_amount_centavos ?? 0)) return { text: 'Nothing was owed on that row.' };
+    await db.batch([db.settle(row.id, now)]);
+
+    // Settling moves NO money, and saying so is the whole second line: the peso left the
+    // account when the loan was made, so the repayment is its own income entry. Marking the
+    // debt closed and crediting the account are two different facts, and a tap that quietly
+    // did both would credit whichever account the loan left rather than the one the cash
+    // actually landed in.
+    //
+    // The REST of the list comes back with it, because the tap clears the keyboard it came
+    // from: on a list, one tap resolves one row, and clearing the buttons of the two loans
+    // you did not touch would send you back to /owed to get them again.
+    const all = await db.allEvents();
+    const left = unsettled(all);
+    const rest = left > 0 ? owedReply(all) : null;
+    return {
+      text: [
+        `✓ settled ${peso(row.shared_amount_centavos ?? 0)}, ${left > 0 ? `${peso(left)} still owed to you` : 'nothing outstanding'}`,
+        'The money is a separate entry: log it as income when it lands, if you have not yet.',
+        ...(rest ? ['', rest.text] : []),
+      ].join('\n'),
+      keyboard: rest?.keyboard,
+    };
   }
 
   if (kind === 'adj') {
@@ -270,7 +317,7 @@ export const COMMANDS = [
   { name: 'fee', args: '<amount>', help: 'attach a transfer fee to the transfer just logged' },
   { name: 'interest', args: '[<account> <amount> [date]]', help: 'what you have earned, or report a credit' },
   { name: 'rate', args: '[account] [10% gross]', help: 'see rates, or set one' },
-  { name: 'owed', args: '', help: 'money you fronted that has not come back' },
+  { name: 'owed', args: '', help: 'money you fronted, and the tap that clears it' },
   { name: 'account', args: '[add|off|on] …', help: 'list accounts, or open and close them' },
   {
     name: 'remind',
@@ -418,10 +465,8 @@ export async function runCommand(
     case 'remind':
     case 'reminders':
       return remindCmd(db, arg, today);
-    case 'owed': {
-      const owed = unsettled(await db.allEvents());
-      return { text: owed > 0 ? `owed to you: ${peso(owed)}` : 'nothing outstanding' };
-    }
+    case 'owed':
+      return owed(db);
     case 'undo':
       return { text: await undo(db, accounts, today) };
     case 'csv':

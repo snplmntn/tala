@@ -37,11 +37,13 @@ import {
   spendByCategory,
   startOfWeek,
   sum,
+  owedRows,
   unsettled,
   type Event,
 } from '../src/ledger.ts';
 import { resolveDate } from '../src/extract.ts';
 import { asCommand } from '../src/handlers.ts';
+import { owedReply } from '../src/reports.ts';
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -353,6 +355,15 @@ test('fronting money for a group does not overstate your own spending', () => {
 
   const settled = ev({ ...meal, id: 99, settled_at: '2026-09-20T00:00:00Z' });
   assert.equal(unsettled([settled]), 0, 'settled receivables stop being owed');
+
+  // /owed prints these rows and totals them, so they come off ONE predicate: a list that
+  // adds up to something other than the figure printed under it is the whole reason the
+  // total used to be the only thing shown.
+  assert.deepEqual(
+    owedRows([meal]).map((r) => r.id),
+    [meal.id],
+  );
+  assert.equal(owedRows([settled]).length, 0);
 });
 
 // ── late entries: the bug that makes history depend on when you run the report ──
@@ -776,4 +787,35 @@ test('a re-send in the backlog is booked once, and a blank caption is not a repe
     duplicates.map((r) => r.id),
     [2, 3],
   );
+});
+
+/**
+ * The list and its buttons are the only way a debt gets closed, so the label has to survive a
+ * long name: slicing the finished string once produced "✓ group dinner with", a button that
+ * no longer says what tapping it does.
+ */
+test('every settle button names a loan and still says paid', () => {
+  const loan = (id: number, merchant: string | null, note: string | null, share: number) =>
+    ev({
+      id,
+      amount_centavos: -share,
+      merchant,
+      note,
+      shared_amount_centavos: share,
+      occurred_at: '2026-09-04',
+    });
+  const { text, keyboard } = owedReply([
+    loan(1, 'mom', null, 200_000),
+    loan(2, null, 'group dinner with the long name', 40_000),
+    loan(3, 'paid back already', null, 5_000),
+    { ...loan(4, 'jollibee', null, 15_000), settled_at: '2026-09-20T00:00:00Z' },
+  ]);
+  assert.ok(!text.includes('jollibee'), 'a settled loan is off the list');
+  assert.equal(keyboard!.length, 3);
+  for (const [button] of keyboard!) {
+    assert.ok(button.text.endsWith(' paid'), `"${button.text}" does not say what it does`);
+    assert.ok(button.text.length <= 20, `"${button.text}" is over the 20-character cap`);
+    assert.match(button.callback_data, /^settled:\d+$/);
+  }
+  assert.equal(owedReply([]).text, 'nothing outstanding');
 });

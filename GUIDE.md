@@ -88,6 +88,20 @@ You fronted for other people:
 The ₱400 stays on your balance (you really did pay it) but is tracked as owed to you. `/owed`
 lists what has not come back.
 
+Lending is the same thing at one hundred percent, so say it the way you would say it:
+
+```
+mom borrowed 2k maribank
+```
+
+> ₱2,000.00 · mom · Maribank · ₱2,000.00 not yours
+
+The ₱2,000 really did leave Maribank, and all of it is owed back. When it comes back, log the
+money as income the way you would log any money arriving, then tap **✓ mom paid** under
+`/owed` to close the debt. Those are two facts, not one: the peso landing in an account and
+the debt ending. A tap that did both would credit whichever account the loan left, which is
+not necessarily where the cash actually came back to.
+
 Moving your own money between your own accounts:
 
 ```
@@ -171,7 +185,7 @@ You can type these as commands or just say them.
 | `/recap month` or `/recap 2026-08` | a whole month, by category        |
 | `/recap last month`                | the previous month                |
 | `/recap business`                  | the business books instead        |
-| `/owed` or "who owes me"           | money you fronted                 |
+| `/owed` or "who owes me"           | each loan, with a tap to clear it |
 | `/csv`                             | the whole ledger as a spreadsheet |
 
 ### Reading `/recap`

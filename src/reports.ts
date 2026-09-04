@@ -24,6 +24,7 @@ import {
   lateEntryPair,
   learnRate,
   monthOf,
+  owedRows,
   parseAmount,
   parseRate,
   peso,
@@ -110,6 +111,58 @@ export async function queryFacts(db: Db, accounts: Account[], today: string): Pr
     if (!rows.length) out.push('  since the anchor: nothing logged.');
   }
   return out.join('\n');
+}
+
+/**
+ * Who owes you what, one row per loan, each with the tap that closes it.
+ *
+ * It used to be the total alone, which is the one shape you cannot act on: the number says
+ * ₱2,150 is outstanding and nothing says which two loans that is, so the money comes back and
+ * the figure never moves. db.settle() existed for a year with no caller for exactly this
+ * reason, and an "owed" total that only ever grows is one people learn to ignore.
+ *
+ * The button carries the row id, so a keyboard found three weeks later still settles the
+ * right loan, and callback() re-reads the row before writing — an inline keyboard lives in
+ * Telegram forever.
+ *
+ * CAPPED, and the cap is a keyboard limit as much as a reading one: a screen of buttons is
+ * not a list you read. The lines still show every loan, so the total is never a lie about
+ * what it counted.
+ */
+const OWED_BUTTONS = 8;
+
+export const owed = async (db: Db): Promise<Reply> => owedReply(await db.allEvents());
+
+/**
+ * Pure, so the settle tap can re-render the list from rows it has already read, and so the
+ * button contract can be tested without a database standing in the way.
+ */
+export function owedReply(all: Event[]): Reply {
+  const rows = owedRows(all).sort((a, b) => a.occurred_at.localeCompare(b.occurred_at));
+  if (!rows.length) return { text: 'nothing outstanding' };
+
+  // Truncated to the NAME, never the whole label: slicing the finished string is how a
+  // button ends up reading "✓ group dinner with", which no longer says what tapping it does.
+  const who = (r: Event) => (r.merchant ?? r.note ?? r.account_id).slice(0, 12);
+  const total = rows.reduce((t, r) => t + (r.shared_amount_centavos ?? 0), 0);
+  const lines = rows.map(
+    (r) =>
+      `  ${r.occurred_at.slice(5)}  ${who(r).padEnd(12)} ${peso(r.shared_amount_centavos ?? 0).padStart(11)}`,
+  );
+
+  return {
+    text: [
+      mono(['owed to you', ...lines, `  ${'total'.padEnd(19)} ${peso(total).padStart(11)}`].join('\n')),
+      ...(rows.length > OWED_BUTTONS ? [`  taps for the oldest ${OWED_BUTTONS}, settle those first`] : []),
+    ].join('\n'),
+    // One per row: a paid-back loan is picked by name, not by typing an id nobody can see.
+    keyboard: rows.slice(0, OWED_BUTTONS).map((r) => [
+      {
+        text: `✓ ${who(r)} paid`,
+        callback_data: `settled:${r.id}`,
+      },
+    ]),
+  };
 }
 
 /**
