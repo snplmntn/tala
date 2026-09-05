@@ -21,6 +21,7 @@ import {
   flowsByDate,
   foldFrom,
   lastDayOfMonth,
+  displayDate,
   lateEntryPair,
   learnRate,
   manilaHour,
@@ -139,7 +140,9 @@ export const owed = async (db: Db): Promise<Reply> => owedReply(await db.allEven
  * button contract can be tested without a database standing in the way.
  */
 export function owedReply(all: Event[]): Reply {
-  const rows = owedRows(all).sort((a, b) => a.occurred_at.localeCompare(b.occurred_at));
+  // Sorted and printed on the day the loan HAPPENED, not the day it books to — see
+  // ledger.displayDate. A late-logged loan otherwise sorts and prints under the anchor.
+  const rows = owedRows(all).sort((a, b) => displayDate(a).localeCompare(displayDate(b)));
   if (!rows.length) return { text: 'nothing outstanding' };
 
   // Truncated to the NAME, never the whole label: slicing the finished string is how a
@@ -148,7 +151,7 @@ export function owedReply(all: Event[]): Reply {
   const total = rows.reduce((t, r) => t + (r.shared_amount_centavos ?? 0), 0);
   const lines = rows.map(
     (r) =>
-      `  ${r.occurred_at.slice(5)}  ${who(r).padEnd(12)} ${peso(r.shared_amount_centavos ?? 0).padStart(11)}`,
+      `  ${displayDate(r).slice(5)}  ${who(r).padEnd(12)} ${peso(r.shared_amount_centavos ?? 0).padStart(11)}`,
   );
 
   return {

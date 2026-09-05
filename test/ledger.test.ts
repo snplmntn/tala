@@ -852,3 +852,21 @@ test('every settle button names a loan and still says paid', () => {
   }
   assert.equal(owedReply([]).text, 'nothing outstanding');
 });
+
+// A loan typed today for money that left on the 2nd books to anchor+1, so occurred_at says
+// the 4th. The date is how you recognise which loan a line is, and the 4th is not a date
+// anything happened on.
+test('a late-logged loan is listed on the day it happened, not the day it books to', () => {
+  const { text } = owedReply([
+    ev({
+      id: 1,
+      amount_centavos: -200_000,
+      merchant: 'mom',
+      note: 'late entry for 2026-09-02',
+      shared_amount_centavos: 200_000,
+      occurred_at: '2026-09-04',
+    }),
+  ]);
+  assert.match(text, /09-02/);
+  assert.ok(!text.includes('09-04'), 'the booking date is not shown');
+});

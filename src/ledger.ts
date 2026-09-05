@@ -570,6 +570,18 @@ export function lateEntryPair<T extends { amount_centavos: number; note?: string
   return [tagged, offset];
 }
 
+/**
+ * The day a late entry is ABOUT, which is never the day it is booked on.
+ *
+ * bookingDate deliberately dates a late row at anchor+1 so it lands inside a reconciliation
+ * window at all, so `occurred_at` cannot answer "when did this happen" for exactly these
+ * rows — /owed printed a loan from the 2nd as the 4th, which is the one field you use to
+ * recognise which loan a line is. The real date is in the note lateEntryPair wrote, and this
+ * is the only reader of that format, kept next to its only writer.
+ */
+export const displayDate = (r: { note?: string | null; occurred_at: string }): string =>
+  r.note?.match(/^late entry for (\d{4}-\d{2}-\d{2})/)?.[1] ?? r.occurred_at;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // The rate learner, with all three guards.
 // ─────────────────────────────────────────────────────────────────────────────

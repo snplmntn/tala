@@ -361,9 +361,7 @@ export class Db {
     };
   }
 
-  // ponytail: NO CALLER. /owed reads settled_at through unsettled(), but nothing in the bot
-  // can set it, so a receivable is currently permanent. Wire this to a button on rows
-  // carrying a shared amount when settling one actually comes up.
+  /** Called by the ✓-paid button /owed hangs on each loan; set-once, so a re-tap is a no-op. */
   settle(id: number, now: string): Write {
     return { sql: 'UPDATE events SET settled_at = ? WHERE id = ? AND settled_at IS NULL', args: [now, id] };
   }
