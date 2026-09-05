@@ -408,6 +408,15 @@ test('a late entry moves no balance, because the anchor already contains it', ()
   assert.equal(offset.category, 'reclassified');
   assert.match(tagged.note!, /late entry for 2026-08-28/);
   assert.match(tagged.note!, /jollibee/);
+
+  // A late-logged LOAN is one debt, not two. The offset only cancels the balance, so it must
+  // not carry shared_amount — /owed counts every row with one, and the pair printed "mom
+  // ₱2,000" twice and totalled ₱4,000 for a single ₱2,000 loan.
+  const [loan, cancel] = lateEntryPair(
+    { amount_centavos: -200_000, note: null, shared_amount_centavos: 200_000 },
+    '2026-09-02',
+  );
+  assert.equal(unsettled([loan, cancel] as never), 200_000, 'a late loan is owed once');
 });
 
 test('an event dated exactly on the anchor date is already inside the anchor', () => {

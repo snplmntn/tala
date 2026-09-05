@@ -561,6 +561,11 @@ export function lateEntryPair<T extends { amount_centavos: number; note?: string
     category: 'reclassified',
     amount_centavos: -row.amount_centavos,
     note: `reclassified from drift before ${lateFor}`,
+    // The offset exists to cancel the BALANCE, and nothing else. Spreading the row carried
+    // shared_amount onto it too, so a late-logged loan appeared TWICE in /owed at twice the
+    // money — owedRows only asks "is shared_amount > 0", and the adjustment answered yes.
+    // The debt is one debt; only the categorised row carries it.
+    shared_amount_centavos: null,
   };
   return [tagged, offset];
 }
