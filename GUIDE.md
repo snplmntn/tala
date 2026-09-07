@@ -118,6 +118,27 @@ it attaches to the transfer you just logged (`fee 0` if there was none).
 A receipt photo works too. It reads the merchant, the date and the total, then asks which
 account paid — no receipt on earth says which card was used.
 
+It also copies down every line printed on it, so a ₱2,412 grocery run can be opened up
+months later. The card says `3 items` and carries a `📄 show items` button; `/items` brings
+back the last receipt once that card has scrolled away.
+
+> ```
+> sm supermarket · 2026-09-03
+>   BEAR BRAND SWTND 300M x2   ₱1,200.00
+>   SAN MIG LIGHT 330ML x6     ₱1,000.00
+>   LUCKY ME PANCIT CANTON       ₱180.00
+>   read                       ₱2,380.00
+>   residual                      ₱32.00
+>   total                      ₱2,412.00
+> ```
+
+**The lines are not the ledger.** Nothing in that list is ever added to a balance, a recap
+or the reconciliation — the total is what the bank charged and the only figure your books
+ever used. That is why a misread line costs you nothing. `residual` is the gap between the
+two: ₱0 means the whole receipt was read, and anything else is a line it could not make out
+or a discount row, which is not a thing you bought. Same idea as the adjustment row — the
+number that tells you how much to trust what is above it.
+
 ### Opening an account
 
 Tell it in words — _"open a beep card account"_, _"start tracking my BPI"_ — and it asks the one

@@ -93,6 +93,24 @@ export interface Extracted {
   reply: string | null;
   /** Only for intent: query — the question to answer in prose UNDER the report. Null for a bare request. */
   ask: string | null;
+  /**
+   * Only for a receipt image: the printed lines. Never summed — see db.ReceiptItem.
+   * Optional in TypeScript but always present on the wire: `strict: true` guarantees the key,
+   * and the alternative was an empty array typed into every fixture that has no receipt.
+   */
+  items?: ExtractedItem[];
+}
+
+/**
+ * One line off a receipt, still as the model transcribed it. Amounts are STRINGS here for
+ * the same reason every other amount is: code parses, the model never computes. `qty` stays
+ * a string permanently — "1.24 kg" is not a number and multiplying it is not code's job
+ * either, since the line total is already printed next to it.
+ */
+export interface ExtractedItem {
+  name: string;
+  qty: string | null;
+  amount: string | null;
 }
 
 /** One side of the conversation, as the model sees it. */
@@ -178,6 +196,7 @@ function schema(accountIds: string[]) {
             'new_account_book',
             'reply',
             'ask',
+            'items',
           ],
           properties: {
             intent: {
@@ -310,6 +329,41 @@ function schema(accountIds: string[]) {
                 'it. Null for a bare request FOR a report, which the table already answers. Null for every ' +
                 'other intent.',
             },
+            items: {
+              type: 'array',
+              // A long SM receipt runs past thirty lines, and `strict: true` is constrained
+              // decoding: run out of output budget mid-array and the JSON is INVALID, which
+              // fails the whole parse and costs you the expense rather than the item list.
+              // The cap is what keeps a wall of groceries from being able to do that.
+              maxItems: 40,
+              description:
+                'ONLY for a receipt IMAGE, and only on the expense event it belongs to: every line item ' +
+                'printed on it. Empty array [] for every typed message and every other intent.',
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['name', 'qty', 'amount'],
+                properties: {
+                  name: {
+                    type: 'string',
+                    description:
+                      'the item name EXACTLY as printed, abbreviations and all: "BEAR BRAND SWTND 300ML". ' +
+                      'Never expanded, corrected or tidied.',
+                  },
+                  qty: {
+                    type: ['string', 'null'],
+                    description: 'the quantity as printed — "2", "1.24 kg". Null when the line shows none.',
+                  },
+                  amount: {
+                    type: ['string', 'null'],
+                    description:
+                      "the line's own total, exactly as printed. Never the unit price multiplied out, and " +
+                      'never computed. Null when the figure is unreadable — a blank line is honest, a ' +
+                      'guessed one is not.',
+                  },
+                },
+              },
+            },
           },
         },
       },
@@ -349,7 +403,10 @@ WHICH FIELDS AN INTENT NEEDS. The intent field's own description defines the nin
 - open_account: new_account and new_account_book, nothing else. Whether it is a bank, wallet, cash or credit is NOT yours to decide — the app asks with buttons. If the SAME message also states a balance, still return ONLY open_account: the account must exist before a balance can attach to it.
 - unknown: always write "reply". Never fall back to unknown for a question about the user's own money — that is a query with "ask" set, which is how it gets answered against the real numbers instead of from memory.
 
-RECEIPT IMAGES: read merchant, date and the TOTAL. Do not try to read every line item. A receipt never says which card was used, so account must be null.`;
+RECEIPT IMAGES: read merchant, date and the TOTAL. A receipt never says which card was used, so account must be null.
+- The TOTAL is the figure that matters and it is the "amount". Read it first and never let the line items change it.
+- Then copy every printed line into "items": name exactly as printed, quantity as printed, and the line's OWN total. Never add them up, never reconcile them against the total, and never invent a line you cannot read. Skip the receipt's own subtotal, VAT, discount and change lines — those are not things that were bought.
+- If the lines are unreadable, return items: [] and keep the total. A missing list costs nothing; a made-up one is a lie about what you bought.`;
 
 export interface ExtractResult {
   events: Extracted[];

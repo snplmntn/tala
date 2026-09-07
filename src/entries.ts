@@ -74,6 +74,16 @@ export async function money(
   const rows = lateFor ? lateEntryPair(base, lateFor) : [base];
   await db.batch(rows.map((r) => db.insertEvent(r as never)));
   const id = (await db.lastEvent())!.id;
+  // The receipt's lines belong to the CATEGORISED row, not to the offsetting adjustment that
+  // a late entry books after it. One batch into one AUTOINCREMENT table is contiguous, which
+  // is the same assumption the line above already makes about the last row being ours.
+  const receiptId = lateFor ? id - 1 : id;
+  // The lines were stored against the inbox row that carried the PHOTO, which is usually the
+  // message before this one — "how much, and from which account?" is asked before any row
+  // exists. Thirty minutes is long enough to go and read the figure off your banking app,
+  // short enough that a photo you never answered cannot attach to next week's expense.
+  await db.claimItems(receiptId, new Date(Date.now() - 30 * 60_000).toISOString());
+  const items = await db.itemsFor(receiptId);
 
   const bits = [peso(Math.abs(finalAmount)), account.name];
   if (base.merchant) bits.splice(1, 0, base.merchant);
@@ -81,10 +91,15 @@ export async function money(
   if (base.shared_amount_centavos) bits.push(`${peso(base.shared_amount_centavos)} not yours`);
   if (lateFor) bits.push(`late entry for ${lateFor}, balance unchanged`);
   if (isRefund) bits.push('refund');
+  // On the card rather than on the button, because the button is an action and the count is
+  // a fact — and the fact is the one that tells you at a glance whether the read worked.
+  if (items.length) bits.push(`${items.length} items`);
 
   const reply: Reply = {
     text: `${e.intent === 'income' ? '+' : ''}${bits.join(' · ')}`,
-    keyboard: rowKeys(id),
+    keyboard: items.length
+      ? [[{ text: '📄 show items', callback_data: `items:${receiptId}` }], ...rowKeys(id)]
+      : rowKeys(id),
   };
 
   // "sent 2k to maya" can legally parse as an expense — the closed-enum rule fires on a

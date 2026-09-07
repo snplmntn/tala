@@ -18,6 +18,7 @@ import {
   dayDiff,
   daysBetween,
   manilaDate,
+  parseAmount,
   peso,
   reminderDue,
   unsettled,
@@ -29,6 +30,7 @@ import {
   balances,
   csv,
   interest,
+  itemsReply,
   owed,
   owedReply,
   queryFacts,
@@ -59,6 +61,17 @@ export async function applyEvent(
     history?: Turn[];
   },
 ): Promise<Reply> {
+  // Stored BEFORE the dispatch below, and keyed on the inbox row rather than on an event,
+  // because the common receipt flow books nothing on this pass: a bare photo answers "how
+  // much, and from which account?" and the row is written by your NEXT message. Waiting for
+  // an event id would throw the lines away on exactly the path they matter most.
+  if (e.intent === 'expense' && e.items?.length) {
+    await db.saveItems(
+      ctx.inboxId,
+      e.items.map((it) => ({ name: it.name, qty: it.qty, amount_centavos: parseAmount(it.amount) })),
+    );
+  }
+
   switch (e.intent) {
     case 'expense':
     case 'income':
@@ -290,6 +303,10 @@ export async function callback(db: Db, data: string, today: string): Promise<Cal
     return { text: `applied ${peso(Math.abs(amount))}, ${await remaining(db, account, today)}` };
   }
 
+  // The row's own buttons stay: reading what was in the bag is not an action on the row, and
+  // taking away void and confirm because you looked would be a trap.
+  if (kind === 'items') return { ...(await itemsReply(db, Number(a))), advice: true };
+
   if (kind === 'nope') return { text: '✗ cancelled, nothing was written' };
   // Advice, not an action. Both of these are waiting on a message you have not typed yet,
   // so taking the buttons away would strand you if you changed your mind.
@@ -318,6 +335,7 @@ export const COMMANDS = [
   { name: 'interest', args: '[<account> <amount> [date]]', help: 'what you have earned, or report a credit' },
   { name: 'rate', args: '[account] [10% gross]', help: 'see rates, or set one' },
   { name: 'owed', args: '', help: 'money you fronted, and the tap that clears it' },
+  { name: 'items', args: '[id]', help: 'what was on a receipt, line by line' },
   { name: 'account', args: '[add|off|on] …', help: 'list accounts, or open and close them' },
   {
     name: 'remind',
@@ -467,6 +485,14 @@ export async function runCommand(
       return remindCmd(db, arg, today);
     case 'owed':
       return owed(db);
+    case 'items': {
+      // Bare = the last receipt, because the card that carried the button has usually
+      // scrolled away by the time you want to look. An id when you have one from /csv.
+      // ponytail: no way to find an OLD receipt by merchant or date. Add `/items sm` when
+      // scrolling back to the row actually starts annoying you.
+      const id = Number(arg) || (await db.lastItemised());
+      return id ? itemsReply(db, id) : { text: 'No receipts with lines yet. Send one as a photo.' };
+    }
     case 'undo':
       return { text: await undo(db, accounts, today) };
     case 'csv':

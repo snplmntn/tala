@@ -55,6 +55,22 @@ export interface Snapshot {
   balance_centavos: number;
 }
 
+/**
+ * One printed line of a receipt. NOT a ledger fact, and that is the whole design: nothing in
+ * here is ever summed into a balance, a recap or the reconciliation, so a line the model
+ * misread is cosmetic rather than a leak. The authoritative figure stays the TOTAL, which is
+ * the number the bank actually charged.
+ *
+ * `qty` is a STRING for the same reason `amount` comes back from the model as one: "2",
+ * "1.24 kg" and "3 @ 39.75" are all things receipts print, and none of them may be multiplied
+ * into the line total by anything but code.
+ */
+export interface ReceiptItem {
+  name: string;
+  qty: string | null;
+  amount_centavos: number | null;
+}
+
 export type Write = { sql: string; args?: InArgs };
 
 export class Db {
@@ -112,6 +128,113 @@ export class Db {
          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       [key, value, new Date().toISOString()],
     );
+  }
+
+  /**
+   * What was ON the receipt, so a ₱2,412 grocery run can be opened up months later.
+   *
+   * Same IF NOT EXISTS-at-first-use pattern as settings() above, for the same reason:
+   * schema.sql has no IF NOT EXISTS and only ever runs against an empty database, so DDL
+   * added there would never reach a ledger that is already deployed.
+   *
+   * Keyed on inbox_id rather than event_id, which is not an accident. A bare photo books
+   * NOTHING — the usual flow is photo -> "how much, and from which account?" -> your answer,
+   * and that answer is a different inbox row entirely. So the lines are written the moment
+   * they are read and claimed by the event when one finally exists.
+   *
+   * No index on event_id: one receipt is thirty rows, a year is a few thousand, and SQLite
+   * scans that in less time than the round trip to reach it.
+   */
+  private itemsReady?: Promise<number>;
+
+  private ensureItems(): Promise<number> {
+    return (this.itemsReady ??= this.run(
+      `CREATE TABLE IF NOT EXISTS receipt_items (
+         inbox_id        INTEGER NOT NULL REFERENCES inbox(id),
+         line_no         INTEGER NOT NULL,
+         name            TEXT    NOT NULL,
+         qty             TEXT,
+         amount_centavos INTEGER,
+         event_id        INTEGER REFERENCES events(id),
+         logged_at       TEXT    NOT NULL,
+         PRIMARY KEY (inbox_id, line_no)
+       )`,
+    ));
+  }
+
+  /**
+   * Every method here swallows its failure, deliberately, and it is the same call getSetting
+   * makes: an expense is money and must be recorded, a list of what was in the bag is a
+   * convenience. Losing the ledger row because the convenience table was unreachable would be
+   * the tail wagging the dog.
+   */
+  async saveItems(inboxId: number, items: ReceiptItem[]): Promise<void> {
+    if (!items.length) return;
+    try {
+      await this.ensureItems();
+      await this.batch(
+        items.map((it, i) => ({
+          sql: `INSERT OR REPLACE INTO receipt_items (inbox_id, line_no, name, qty, amount_centavos, logged_at)
+                VALUES (?, ?, ?, ?, ?, ?)`,
+          args: [inboxId, i + 1, it.name, it.qty, it.amount_centavos, new Date().toISOString()],
+        })),
+      );
+    } catch {
+      /* the total is still recorded; the lines are not worth an expense */
+    }
+  }
+
+  /**
+   * Attach the newest unclaimed receipt to a row that has just booked.
+   *
+   * Single user, single chat — which is what makes "the last receipt not yet on a row" an
+   * unambiguous phrase and saves carrying a correlation id through two messages and a
+   * process restart. `since` is the entire guard: a receipt you photographed and never
+   * answered must not latch onto an unrelated expense next week.
+   *
+   * ponytail: last-one-wins. Photograph two receipts and answer them out of order and the
+   * lines land on the wrong row. Put a receipt id in the question when that stops being
+   * theoretical.
+   */
+  async claimItems(eventId: number, since: string): Promise<void> {
+    try {
+      await this.ensureItems();
+      await this.run(
+        `UPDATE receipt_items SET event_id = ?
+          WHERE event_id IS NULL
+            AND inbox_id = (SELECT MAX(inbox_id) FROM receipt_items
+                             WHERE event_id IS NULL AND logged_at >= ?)`,
+        [eventId, since],
+      );
+    } catch {
+      /* the row is written and correct; it just will not open up */
+    }
+  }
+
+  async itemsFor(eventId: number): Promise<ReceiptItem[]> {
+    try {
+      await this.ensureItems();
+      return await this.all<ReceiptItem>(
+        'SELECT name, qty, amount_centavos FROM receipt_items WHERE event_id = ? ORDER BY line_no',
+        [eventId],
+      );
+    } catch {
+      return [];
+    }
+  }
+
+  /** The most recent row that has any, for a bare /items once the card has scrolled away. */
+  async lastItemised(): Promise<number | null> {
+    try {
+      await this.ensureItems();
+      const r = await this.one<{ event_id: number }>(
+        `SELECT ri.event_id FROM receipt_items ri JOIN events e ON e.id = ri.event_id
+          WHERE e.voided_at IS NULL ORDER BY ri.event_id DESC LIMIT 1`,
+      );
+      return r?.event_id ?? null;
+    } catch {
+      return null;
+    }
   }
 
   /** Load a whole .sql file. Only used to seed a local dev database from schema.sql. */

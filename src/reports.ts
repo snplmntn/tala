@@ -182,6 +182,48 @@ export function owedReply(all: Event[]): Reply {
  * unknown starting point. Printing a figure there would invent one, so it asks for the
  * anchor instead: the refusal balanceOf() already makes, said out loud.
  */
+/**
+ * What was in the bag. The one place a receipt's printed lines are shown back.
+ *
+ * The lines are NOT the ledger and are never treated as it: the total is the figure the bank
+ * charged and the only one your balance ever used, so this table's job is to be browsable,
+ * not to add up. When it does not add up the gap is printed as `residual` and named in a
+ * sentence, exactly as the reconciliation adjustment is — a line the model could not read, or
+ * a discount row that is not a thing you bought. Seeing ₱0 there is what tells you the read
+ * was complete.
+ */
+export async function itemsReply(db: Db, eventId: number): Promise<Reply> {
+  const row = await db.one<Event>('SELECT * FROM events WHERE id = ?', [eventId]);
+  if (!row) return { text: 'That row is gone.' };
+  const items = await db.itemsFor(eventId);
+  if (!items.length) return { text: 'No receipt lines on that row. Only photos carry them.' };
+
+  const total = Math.abs(row.amount_centavos);
+  const read = items.reduce((t, it) => t + (it.amount_centavos ?? 0), 0);
+  // Quantity rides in the label rather than in a column of its own: "1.24 kg" and "2" are
+  // different widths, and a column that cannot be padded is a column that breaks the table.
+  const lines = items.map((it) => {
+    // The NAME is what gets cut, never the quantity: receipts print names long enough to
+    // overflow any phone column and "x6" is the half that tells you what you actually bought.
+    const tail = it.qty ? ` x${it.qty}` : '';
+    const label = `${it.name.slice(0, 24 - tail.length)}${tail}`;
+    const amount = it.amount_centavos == null ? '?' : peso(it.amount_centavos);
+    return `  ${label.padEnd(24)} ${amount.padStart(11)}`;
+  });
+  const foot = [`  ${'read'.padEnd(24)} ${peso(read).padStart(11)}`];
+  if (read !== total) foot.push(`  ${'residual'.padEnd(24)} ${peso(total - read).padStart(11)}`);
+  foot.push(`  ${'total'.padEnd(24)} ${peso(total).padStart(11)}`);
+
+  const head = [row.merchant ?? 'receipt', displayDate(row)].join(' · ');
+  const out = [mono([head, ...lines, ...foot].join('\n'))];
+  // Outside the block, like every other hint: the sentence is prose and the table is columns.
+  if (read !== total)
+    out.push(
+      `  ${peso(Math.abs(total - read))} is not in the lines: one I could not read, or a discount row. Your balance used the total.`,
+    );
+  return { text: out.join('\n') };
+}
+
 export async function remaining(db: Db, account: Account, today: string): Promise<string> {
   const b = await balanceFor(db, account, today);
   return b.anchorDate

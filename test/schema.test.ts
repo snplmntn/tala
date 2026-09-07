@@ -1306,3 +1306,61 @@ test('an unanchored account has no balance to empty, so it asks instead of inven
   assert.match(r.text, /not anchored/);
   assert.equal((await db.all("SELECT * FROM events WHERE type = 'transfer'")).length, 0);
 });
+
+test('a receipt photo keeps its lines through the follow-up that books the row, and they change no sum', async () => {
+  // The whole receipt flow in the order it actually happens: a bare photo books NOTHING and
+  // asks, and the row is written by the next message under a DIFFERENT inbox id. That gap is
+  // why the lines are stored against the inbox row and claimed later, and it is the thing
+  // that silently breaks if anyone ever "simplifies" them onto an event id.
+  const db = await fresh();
+  const accounts = await db.accounts();
+
+  const photoInbox = await db.claim({ update_id: 1, has_photo: true, now: '2026-09-03T02:00:00Z' });
+  const asked = await applyEvent(
+    db,
+    accounts,
+    spokenEvent({
+      intent: 'expense',
+      merchant: 'sm supermarket',
+      category: 'groceries',
+      items: [
+        { name: 'BEAR BRAND SWTND 300ML', qty: '2', amount: '1,200.00' },
+        { name: 'SAN MIG LIGHT 330ML', qty: '6', amount: '1,000.00' },
+        { name: 'LUCKY ME PANCIT CANTON', qty: null, amount: '180.00' },
+      ],
+    }),
+    { inboxId: photoInbox!, today: '2026-09-03', hadPhoto: true },
+  );
+  assert.match(asked.text, /How much, and from which account/);
+  assert.equal((await db.all('SELECT * FROM events')).length, 0, 'a photo alone books nothing');
+
+  const answerInbox = await db.claim({ update_id: 2, has_photo: false, now: '2026-09-03T02:01:00Z' });
+  const booked = await applyEvent(
+    db,
+    accounts,
+    spokenEvent({
+      intent: 'expense',
+      amount: '2412',
+      account: 'maribank',
+      merchant: 'sm supermarket',
+      category: 'groceries',
+    }),
+    { inboxId: answerInbox!, today: '2026-09-03', hadPhoto: false },
+  );
+  assert.match(booked.text, /3 items/, 'the count says the read worked, on the card');
+  assert.equal(booked.keyboard![0][0].callback_data, 'items:1');
+
+  // The ledger is exactly the total. If line items ever reach a sum, this is what fails.
+  const [totals] = await db.all<{ n: number }>('SELECT SUM(amount_centavos) AS n FROM events');
+  assert.equal(totals.n, -241200);
+
+  const view = await runCommand(db, accounts, '/items', '2026-09-03');
+  // Truncated at the column, and the QUANTITY is what survives it — a name cut short is
+  // still recognisable, a line that has lost its "x2" is a different purchase.
+  assert.match(view!.text, /BEAR BRAND SWTND 300M x2/);
+  assert.match(view!.text, /SAN MIG LIGHT 330ML x6/);
+  assert.match(view!.text, /read\s+₱2,380\.00/);
+  // 2,412.00 charged, 2,380.00 printed on the lines: the gap is named, never absorbed.
+  assert.match(view!.text, /residual\s+₱32\.00/);
+  assert.match(view!.text, /₱32\.00 is not in the lines/);
+});

@@ -118,7 +118,13 @@ export async function clearKeyboard(token: string, chatId: number, messageId: nu
 }
 
 export async function answerCallback(token: string, id: string, text?: string) {
-  return call(token, 'answerCallbackQuery', { callback_query_id: id, ...(text ? { text } : {}) });
+  // plain(): a toast carries no markup, so a reply whose first line is a monospace table
+  // would otherwise put the marker control character into it verbatim. Guarded here rather
+  // than at the one caller that can do it, because every callback reply routes through here.
+  return call(token, 'answerCallbackQuery', {
+    callback_query_id: id,
+    ...(text ? { text: plain(text) } : {}),
+  });
 }
 
 export async function sendCsv(token: string, chatId: number, filename: string, csv: string) {
